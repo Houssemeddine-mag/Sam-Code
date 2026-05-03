@@ -43,6 +43,7 @@ npm run dev
 ```
 
 This will start:
+
 - Electron main process
 - Vite development server for the renderer
 - Hot module replacement for fast development
@@ -104,10 +105,10 @@ sam-code/
 
 The application can be configured using environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | API key for OpenAI assistant | (required for AI features) |
-| `SAMCODE_DATA_DIR` | Custom data directory | OS-specific app data folder |
+| Variable           | Description                  | Default                     |
+| ------------------ | ---------------------------- | --------------------------- |
+| `OPENAI_API_KEY`   | API key for OpenAI assistant | (required for AI features)  |
+| `SAMCODE_DATA_DIR` | Custom data directory        | OS-specific app data folder |
 
 ### AI Assistant Setup
 
@@ -147,12 +148,12 @@ To enable the AI coding assistant:
 
 Sam Code is built and tested on:
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| Windows 10/11 | ✅ Supported | NSIS installer |
-| macOS 12+ | ✅ Supported | DMG installer |
-| Ubuntu 22.04+ | ✅ Supported | AppImage |
-| Other Linux | ⚠️ Community | May work with dependencies |
+| Platform      | Status       | Notes                      |
+| ------------- | ------------ | -------------------------- |
+| Windows 10/11 | ✅ Supported | NSIS installer             |
+| macOS 12+     | ✅ Supported | DMG installer              |
+| Ubuntu 22.04+ | ✅ Supported | AppImage                   |
+| Other Linux   | ⚠️ Community | May work with dependencies |
 
 ## 🤝 Contributing
 
@@ -194,6 +195,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 For questions and support:
+
 - Open an issue in the [GitHub Issues](https://github.com/Houssemeddine-mag/Sam-Code/issues) section
 - Check the [Discussions](https://github.com/Houssemeddine-mag/Sam-Code/discussions) for community help
 - Review the [documentation](#) for common questions

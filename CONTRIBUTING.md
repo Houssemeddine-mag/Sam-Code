@@ -63,6 +63,7 @@ Feature requests are welcome! Please provide:
 ### Commit Messages
 
 Use clear, descriptive commit messages:
+
 - `feat: add new feature`
 - `fix: resolve issue with file saving`
 - `docs: update documentation`
@@ -121,6 +122,7 @@ Please be respectful and considerate of others when contributing. We follow the 
 ## Getting Help
 
 If you need help with your contribution:
+
 - Check existing issues and pull requests
 - Ask questions in the issue tracker
 - Look at the existing code for patterns and conventions
