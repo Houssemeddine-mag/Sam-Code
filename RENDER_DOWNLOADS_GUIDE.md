@@ -5,6 +5,7 @@
 You cannot build `.dmg` on Windows.
 
 Use GitHub Actions workflow in this repo to build:
+
 - Windows: `.exe`
 - macOS: `.dmg`
 - Linux: `.AppImage`
@@ -17,7 +18,8 @@ Use GitHub Actions workflow in this repo to build:
 4. Wait for deploy success.
 
 Base URL example:
-- `https://sam-code-downloads.onrender.com`
+
+- `https://sam-code.onrender.com`
 
 ## 3) Upload files to Render
 
@@ -25,7 +27,7 @@ PowerShell examples:
 
 ```powershell
 $TOKEN = "YOUR_UPLOAD_TOKEN"
-$BASE = "https://sam-code-downloads.onrender.com"
+$BASE = "https://sam-code.onrender.com"
 
 curl.exe -X POST "$BASE/upload?token=$TOKEN" -F "file=@dist/sam-code-1.0.0-setup.exe" -F "filename=sam-code-1.0.0-setup.exe"
 curl.exe -X POST "$BASE/upload?token=$TOKEN" -F "file=@path/to/sam-code-1.0.0.dmg" -F "filename=sam-code-1.0.0.dmg"
@@ -40,9 +42,9 @@ curl.exe "$BASE/files"
 
 ## 4) Final download URLs
 
-- `https://sam-code-downloads.onrender.com/download/sam-code-1.0.0-setup.exe`
-- `https://sam-code-downloads.onrender.com/download/sam-code-1.0.0.dmg`
-- `https://sam-code-downloads.onrender.com/download/sam-code-1.0.0.AppImage`
+- `https://sam-code.onrender.com/download/sam-code-1.0.0-setup.exe`
+- `https://sam-code.onrender.com/download/sam-code-1.0.0.dmg`
+- `https://sam-code.onrender.com/download/sam-code-1.0.0.AppImage`
 
 ## 5) Landing page
 
