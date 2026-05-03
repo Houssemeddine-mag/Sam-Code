@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 jobs:
   build:
@@ -40,9 +40,23 @@ jobs:
       - name: Build installer
         run: ${{ matrix.script }}
 
-      - name: Upload artifacts
+      - name: Upload artifacts to Actions
         uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.os }}
           path: ${{ matrix.artifact_glob }}
           if-no-files-found: warn
+
+      - name: Upload to Render (if secret provided)
+        if: ${{ secrets.RENDER_UPLOAD_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -e
+          echo "Looking for built files: ${{ matrix.artifact_glob }}"
+          FILE=$(ls ${{ matrix.artifact_glob }} 2>/dev/null | head -n1 || true)
+          if [ -f "$FILE" ]; then
+            echo "Uploading $FILE to Render"
+            curl -s -X POST "https://sam-code.onrender.com/upload?token=${{ secrets.RENDER_UPLOAD_TOKEN }}" -F "file=@$FILE" -F "filename=$(basename $FILE)" || true
+          else
+            echo "No file found to upload for pattern: ${{ matrix.artifact_glob }}"
+          fi
