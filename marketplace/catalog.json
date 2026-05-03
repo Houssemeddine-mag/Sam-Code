@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "name": "SamCode Marketplace",
+  "description": "Catalog scaffold for SamCode packages, plugins, and notebook runtimes.",
+  "items": [
+    {
+      "id": "python-notebook-core",
+      "name": "Python Notebook Core",
+      "type": "kernel",
+      "description": "Runs notebooks cell by cell with rich outputs and notebook state.",
+      "path": "packages/python-notebook-core/manifest.json"
+    },
+    {
+      "id": "pandas-numpy",
+      "name": "Pandas and NumPy",
+      "type": "package",
+      "description": "Adds the core data analysis libraries used in Python notebooks.",
+      "path": "packages/pandas-numpy/manifest.json",
+      "requires": ["python-notebook-core"]
+    },
+    {
+      "id": "data-science-pack",
+      "name": "Data Science Pack",
+      "type": "bundle",
+      "description": "Installs notebook core, pandas, NumPy and common data science tools together.",
+      "path": "packages/data-science-pack/manifest.json",
+      "requires": ["python-notebook-core", "pandas-numpy"]
+    },
+    {
+      "id": "live-server",
+      "name": "Live Server",
+      "type": "plugin",
+      "description": "Preview HTML files locally and refresh the browser automatically.",
+      "path": "packages/live-server/manifest.json",
+      "requires": ["python-notebook-core"]
+    }
+  ]
+}

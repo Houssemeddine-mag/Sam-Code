@@ -1,0 +1,446 @@
+/* eslint-disable react/prop-types, react-hooks/exhaustive-deps, react-hooks/set-state-in-effect, no-unused-vars */
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Terminal } from 'xterm'
+import { FitAddon } from 'xterm-addon-fit'
+import 'xterm/css/xterm.css'
+import { Plus, Terminal as TerminalIcon, X } from 'lucide-react'
+
+function escapeForPowerShell(path) {
+  return String(path || '').replaceAll("'", "''")
+}
+
+function getCdCommand(shell, cwd) {
+  const target = String(cwd || '').trim()
+  if (!target) return ''
+
+  if (shell === 'cmd') {
+    return `cd /d "${target}"\r\n`
+  }
+
+  return `Set-Location -LiteralPath '${escapeForPowerShell(target)}'\r\n`
+}
+
+function TerminalSession({ session, cwd, active, pushActivity }) {
+  const containerRef = useRef(null)
+  const terminalRef = useRef(null)
+  const fitAddonRef = useRef(null)
+  const fitTimerRef = useRef(null)
+  const promptTimerRef = useRef(null)
+  const sessionIdRef = useRef(session.id)
+  const dataDisposeRef = useRef(null)
+  const exitDisposeRef = useRef(null)
+  const initializedRef = useRef(false)
+  const previousCwdRef = useRef(cwd)
+  const [status, setStatus] = useState('Starting terminal...')
+  const resolvedCwd = String(session.cwd || cwd || '').trim()
+
+  const fitTerminal = () => {
+    if (!fitAddonRef.current || !terminalRef.current || !containerRef.current) {
+      return false
+    }
+
+    const { width, height } = containerRef.current.getBoundingClientRect()
+    if (width <= 0 || height <= 0) {
+      return false
+    }
+
+    try {
+      fitAddonRef.current.fit()
+    } catch (error) {
+      return false
+    }
+
+    if (sessionIdRef.current) {
+      window.api.resizeTerminal(
+        sessionIdRef.current,
+        terminalRef.current.cols,
+        terminalRef.current.rows
+      )
+    }
+
+    terminalRef.current.focus()
+    refreshPrompt()
+    return true
+  }
+
+  const refreshPrompt = () => {
+    if (!sessionIdRef.current) return
+    if (promptTimerRef.current) {
+      window.clearTimeout(promptTimerRef.current)
+    }
+    promptTimerRef.current = window.setTimeout(() => {
+      if (sessionIdRef.current) {
+        window.api.writeTerminal(sessionIdRef.current, '\r')
+      }
+    }, 25)
+  }
+
+  const clearPendingTimers = () => {
+    if (fitTimerRef.current) {
+      window.clearTimeout(fitTimerRef.current)
+      fitTimerRef.current = null
+    }
+    if (promptTimerRef.current) {
+      window.clearTimeout(promptTimerRef.current)
+      promptTimerRef.current = null
+    }
+  }
+
+  const cleanup = () => {
+    clearPendingTimers()
+
+    if (dataDisposeRef.current) {
+      dataDisposeRef.current()
+      dataDisposeRef.current = null
+    }
+
+    if (exitDisposeRef.current) {
+      exitDisposeRef.current()
+      exitDisposeRef.current = null
+    }
+
+    if (terminalRef.current) {
+      terminalRef.current.dispose()
+      terminalRef.current = null
+    }
+
+    fitAddonRef.current = null
+
+    if (sessionIdRef.current && window?.api?.disposeTerminal) {
+      window.api.disposeTerminal(sessionIdRef.current)
+    }
+
+    initializedRef.current = false
+    sessionIdRef.current = session.id
+  }
+
+  useEffect(() => {
+    let cancelled = false
+
+    const initialize = async () => {
+      if (!containerRef.current || !window?.api?.createTerminal) {
+        return
+      }
+
+      cleanup()
+
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'Cascadia Code, Consolas, monospace',
+        fontSize: 13,
+        scrollback: 5000,
+        theme: {
+          background: '#1e1e1e',
+          foreground: '#d4d4d4',
+          cursor: '#d4d4d4'
+        }
+      })
+      const fitAddon = new FitAddon()
+
+      terminal.loadAddon(fitAddon)
+      terminal.open(containerRef.current)
+      terminalRef.current = terminal
+      fitAddonRef.current = fitAddon
+
+      const created = await window.api.createTerminal({
+        sessionId: session.id,
+        cwd: resolvedCwd,
+        shell: session.shell
+      })
+
+      if (cancelled) {
+        if (created?.sessionId && window?.api?.disposeTerminal) {
+          window.api.disposeTerminal(created.sessionId)
+        }
+        terminal.dispose()
+        return
+      }
+
+      sessionIdRef.current = created?.sessionId || session.id
+      initializedRef.current = true
+      previousCwdRef.current = resolvedCwd
+      terminal.writeln(`Sam Code terminal opened in ${resolvedCwd || 'home'}`)
+      terminal.writeln('')
+      setStatus(`Running ${session.shell} in ${resolvedCwd || 'home'}`)
+      pushActivity?.('success', `Opened ${session.title}.`)
+
+      dataDisposeRef.current = window.api.onTerminalData((payload) => {
+        if (payload.sessionId === sessionIdRef.current && terminalRef.current) {
+          terminalRef.current.write(payload.data)
+        }
+      })
+
+      exitDisposeRef.current = window.api.onTerminalExit((payload) => {
+        if (payload.sessionId === sessionIdRef.current) {
+          setStatus(`Terminal exited with code ${payload.exitCode}.`)
+          pushActivity?.('warning', `${session.title} exited with code ${payload.exitCode}.`)
+        }
+      })
+
+      terminal.onData((data) => {
+        if (sessionIdRef.current) {
+          window.api.writeTerminal(sessionIdRef.current, data)
+        }
+      })
+
+      terminal.onResize(({ cols, rows }) => {
+        if (sessionIdRef.current) {
+          window.api.resizeTerminal(sessionIdRef.current, cols, rows)
+        }
+      })
+
+      fitTimerRef.current = window.setTimeout(() => {
+        fitTerminal()
+      }, 0)
+    }
+
+    initialize()
+
+    return () => {
+      cancelled = true
+      cleanup()
+    }
+  }, [resolvedCwd, session.id, session.shell])
+
+  useEffect(() => {
+    if (!initializedRef.current || !sessionIdRef.current || !resolvedCwd) {
+      previousCwdRef.current = resolvedCwd
+      return undefined
+    }
+
+    if (previousCwdRef.current === resolvedCwd) {
+      return undefined
+    }
+
+    previousCwdRef.current = resolvedCwd
+    const command = getCdCommand(session.shell, resolvedCwd)
+    if (command) {
+      window.api.writeTerminal(sessionIdRef.current, command)
+      pushActivity?.('info', `${session.title} moved to the selected folder.`)
+      setStatus(`Running ${session.shell} in ${resolvedCwd}`)
+      refreshPrompt()
+    }
+
+    return undefined
+  }, [resolvedCwd, pushActivity, session.shell, session.title])
+
+  useEffect(() => {
+    if (active && fitAddonRef.current && terminalRef.current) {
+      fitTimerRef.current = window.setTimeout(() => {
+        fitTerminal()
+      }, 0)
+    }
+  }, [active])
+
+  if (!active) {
+    return (
+      <div
+        className="absolute inset-0 h-full min-h-0 opacity-0 pointer-events-none"
+        aria-hidden="true"
+      >
+        <div ref={containerRef} className="h-full min-h-0 w-full" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="absolute inset-0 flex h-full min-h-0 flex-col bg-[#1e1e1e]">
+      <div ref={containerRef} className="min-h-0 flex-1 bg-[#1e1e1e]" />
+      <div className="border-t border-black bg-[#252526] px-3 py-1 text-[11px] text-gray-400">
+        {status}
+      </div>
+    </div>
+  )
+}
+
+function TerminalDock({ open, cwd, onClose, pushActivity }) {
+  const [sessions, setSessions] = useState([])
+  const [activeSessionId, setActiveSessionId] = useState('')
+  const [defaultShell, setDefaultShell] = useState('powershell')
+  const nextIndexRef = useRef(1)
+  const resolvedCwd = String(cwd || '').trim()
+
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId) || sessions[0],
+    [activeSessionId, sessions]
+  )
+
+  const createSession = (shell = defaultShell) => {
+    const index = nextIndexRef.current++
+    const id = `terminal-${Date.now()}-${index}`
+    const nextSession = {
+      id,
+      title: `Terminal ${index}`,
+      shell,
+      cwd: resolvedCwd
+    }
+
+    setSessions((current) => [...current, nextSession])
+    setActiveSessionId(id)
+    window.setTimeout(() => {
+      pushActivity?.('info', `Opened ${nextSession.title}.`)
+    }, 0)
+  }
+
+  useEffect(() => {
+    if (open && sessions.length === 0) {
+      createSession(defaultShell)
+    }
+  }, [open, sessions.length, defaultShell, resolvedCwd])
+
+  useEffect(() => {
+    if (!open || !resolvedCwd) {
+      return
+    }
+
+    setSessions((current) => current.map((session) => ({ ...session, cwd: resolvedCwd })))
+  }, [open, resolvedCwd])
+
+  useEffect(() => {
+    if (!open) {
+      setSessions([])
+      setActiveSessionId('')
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (open && !activeSessionId && sessions.length > 0) {
+      setActiveSessionId(sessions[0].id)
+    }
+  }, [activeSessionId, open, sessions])
+
+  const closeSession = (sessionId) => {
+    setSessions((current) => {
+      const nextSessions = current.filter((session) => session.id !== sessionId)
+      if (nextSessions.length === 0) {
+        window.setTimeout(() => onClose?.(), 0)
+      }
+      return nextSessions
+    })
+    setActiveSessionId((currentActiveId) => (currentActiveId === sessionId ? '' : currentActiveId))
+  }
+
+  const closeAllSessions = () => {
+    setSessions([])
+    setActiveSessionId('')
+    onClose?.()
+  }
+
+  if (!open) {
+    return null
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#1e1e1e]">
+      <div className="flex items-center justify-between border-b border-black bg-[#252526] px-3 py-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-400">
+            <TerminalIcon size={14} />
+            Terminal
+          </div>
+          <div className="min-w-0 truncate text-[11px] text-gray-500">
+            {cwd || 'Open a folder first'}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={defaultShell}
+            onChange={(e) => setDefaultShell(e.target.value)}
+            className="rounded border border-gray-600 bg-[#3c3c3c] px-2 py-1 text-xs text-white outline-none"
+          >
+            <option value="powershell">PowerShell</option>
+            <option value="cmd">Command Prompt</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => createSession(defaultShell)}
+            className="inline-flex items-center gap-2 rounded bg-[#3c3c3c] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#4b4b4b] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Plus size={13} />
+            New Terminal
+          </button>
+          <button
+            type="button"
+            onClick={closeAllSessions}
+            className="rounded p-1.5 text-gray-300 transition-colors hover:bg-[#3c3c3c] hover:text-white"
+            aria-label="Close terminal pane"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-black bg-[#1e1e1e] px-2 py-1">
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            className={`flex min-w-0 items-center gap-2 rounded px-2 py-1 text-xs transition-colors ${activeSession?.id === session.id ? 'bg-[#2d2d2d] text-white' : 'bg-transparent text-gray-400 hover:bg-[#252526] hover:text-white'}`}
+          >
+            <button
+              type="button"
+              onClick={() => setActiveSessionId(session.id)}
+              className="flex min-w-0 items-center gap-2 text-left"
+            >
+              <TerminalIcon size={12} className="shrink-0" />
+              <span className="max-w-40 truncate">{session.title}</span>
+              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-gray-300">
+                {session.shell}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => closeSession(session.id)}
+              className="rounded p-1 text-gray-400 hover:bg-[#3c3c3c] hover:text-white"
+              aria-label={`Close ${session.title}`}
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => createSession(defaultShell)}
+          className="ml-1 inline-flex items-center gap-2 rounded px-2 py-2 text-xs text-gray-400 transition-colors hover:bg-[#252526] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Plus size={12} />
+          New
+        </button>
+      </div>
+
+      <div className="relative min-h-0 flex-1 overflow-hidden">
+        {sessions.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-gray-400">
+            <div>
+              <div className="mb-2 text-base font-semibold text-white">
+                No terminal sessions open
+              </div>
+              <div className="mb-4">
+                Create a terminal tab to run commands inside the selected folder.
+              </div>
+              <button
+                type="button"
+                onClick={() => createSession(defaultShell)}
+                className="rounded bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-600"
+              >
+                Open Terminal
+              </button>
+            </div>
+          </div>
+        ) : (
+          sessions.map((session) => (
+            <TerminalSession
+              key={session.id}
+              session={session}
+              cwd={cwd}
+              active={session.id === activeSession?.id}
+              pushActivity={pushActivity}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default TerminalDock

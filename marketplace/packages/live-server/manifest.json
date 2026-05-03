@@ -1,0 +1,24 @@
+{
+  "id": "live-server",
+  "name": "Live Server",
+  "type": "plugin",
+  "version": "1.0.0",
+  "description": "Serves HTML files locally and refreshes the preview so you can inspect pages like VS Code Live Server.",
+  "entry": "index.mjs",
+  "runtime": {
+    "language": "node"
+  },
+  "features": [
+    "static file serving",
+    "HTML preview",
+    "auto reload",
+    "open in browser",
+    "file watch",
+    "local preview port management"
+  ],
+  "ui": {
+    "requirements": ["go-live-button", "preview-panel", "open-browser-action", "reload-status"]
+  },
+  "dependencies": ["python-notebook-core"],
+  "installedPackages": ["express", "chokidar", "ws", "open", "mime-types"]
+}

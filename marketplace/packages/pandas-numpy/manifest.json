@@ -1,0 +1,24 @@
+{
+  "id": "pandas-numpy",
+  "name": "Pandas and NumPy",
+  "type": "package",
+  "version": "1.0.0",
+  "description": "Adds the essential data analysis libraries used in notebooks and scientific workflows.",
+  "entry": "index.mjs",
+  "runtime": {
+    "language": "python"
+  },
+  "features": [
+    "data frames",
+    "arrays and vectorized math",
+    "CSV and Excel loading",
+    "grouping and aggregation",
+    "time series support",
+    "scientific calculations"
+  ],
+  "ui": {
+    "requirements": ["notebook-toolbar", "analysis-snippets", "data-preview", "chart-shortcuts"]
+  },
+  "dependencies": ["python-notebook-core"],
+  "installedPackages": ["pandas", "numpy", "python-dateutil", "pytz", "openpyxl", "xlsxwriter"]
+}

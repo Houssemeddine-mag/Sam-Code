@@ -1,0 +1,40 @@
+{
+  "id": "python-notebook-core",
+  "name": "Python Notebook Core",
+  "type": "kernel",
+  "version": "1.0.0",
+  "description": "Core notebook runtime for SamCode. Runs cells one by one, captures outputs, renders rich results, and manages notebook state.",
+  "entry": "index.mjs",
+  "runtime": {
+    "language": "python",
+    "executionMode": "cell-by-cell",
+    "supportsOutputs": true,
+    "supportsPlots": true,
+    "supportsTables": true,
+    "supportsMarkdown": true,
+    "supportsHtml": true,
+    "supportsInterrupt": true
+  },
+  "features": [
+    "cell execution",
+    "cell output rendering",
+    "stdout and stderr capture",
+    "rich display objects",
+    "notebook state persistence",
+    "execution history",
+    "kernel restart",
+    "interrupt execution"
+  ],
+  "ui": {
+    "requirements": ["notebook-toolbar", "cell-actions", "output-panel", "run-controls"]
+  },
+  "dependencies": [],
+  "installedPackages": [
+    "ipykernel",
+    "jupyter-client",
+    "traitlets",
+    "nbformat",
+    "matplotlib",
+    "plotly"
+  ]
+}
