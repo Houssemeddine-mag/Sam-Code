@@ -2441,7 +2441,7 @@ Rules:
             Sam Code
           </button>
           <div className="text-xs font-semibold text-gray-300">
-            <Bot size={14} className="mr-1 inline-block align-[-2px]" />
+            <Bot size={18} className="mr-1 inline-block align-[-2px]" />
             Sam Code
           </div>
         </div>
