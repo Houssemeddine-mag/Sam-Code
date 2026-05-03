@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sam-code-downloads
+    env: docker
+    dockerfilePath: ./render-downloads/Dockerfile
+    autoDeploy: false
+    healthCheckPath: /health
+    disk:
+      name: sam-code-downloads-disk
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: UPLOAD_TOKEN
+        generateValue: true
