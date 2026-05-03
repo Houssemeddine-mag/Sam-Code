@@ -37,6 +37,14 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            icnsutils graphicsmagick xz-utils libgconf-2-4 libgtk-3-0 libnotify4 libxtst6 libxss1 libnss3 \
+            squashfs-tools rpm fakeroot libglu1-mesa libglib2.0-0 libfuse2
+
       - name: Build installer
         run: ${{ matrix.script }}
 
