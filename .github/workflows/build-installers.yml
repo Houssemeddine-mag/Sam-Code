@@ -56,15 +56,15 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload to Render (if secret provided)
-        if: ${{ secrets.RENDER_UPLOAD_TOKEN != '' }}
         shell: bash
+        env:
+          RENDER_TOKEN: ${{ secrets.RENDER_UPLOAD_TOKEN }}
         run: |
-          set -e
           echo "Looking for built files: ${{ matrix.artifact_glob }}"
           FILE=$(ls ${{ matrix.artifact_glob }} 2>/dev/null | head -n1 || true)
-          if [ -f "$FILE" ]; then
+          if [ -f "$FILE" ] && [ -n "$RENDER_TOKEN" ]; then
             echo "Uploading $FILE to Render"
-            curl -s -X POST "https://sam-code.onrender.com/upload?token=${{ secrets.RENDER_UPLOAD_TOKEN }}" -F "file=@$FILE" -F "filename=$(basename $FILE)" || true
+            curl -s -X POST "https://sam-code.onrender.com/upload?token=$RENDER_TOKEN" -F "file=@$FILE" -F "filename=$(basename $FILE)" || true
           else
-            echo "No file found to upload for pattern: ${{ matrix.artifact_glob }}"
+            echo "No file or token; skipping Render upload"
           fi
