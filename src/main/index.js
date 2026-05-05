@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import { join, basename, dirname, resolve, relative, isAbsolute } from 'path'
+import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import fs from 'fs/promises'
@@ -10,6 +11,718 @@ import icon from '../../resources/icon.png?asset'
 import { registerMarketplaceHandlers, activateInstalledPackages } from './marketplace.js'
 
 const terminalSessions = new Map()
+const notebookSessions = new Map()
+const PYTHON_EXECUTABLE_NAMES =
+  process.platform === 'win32' ? ['python.exe', 'python3.exe'] : ['python', 'python3', 'pypy3']
+
+const NOTEBOOK_WORKER_SCRIPT = String.raw`
+import ast
+import contextlib
+import base64
+import io
+import json
+import os
+import sys
+import traceback
+import webbrowser
+
+globals_ns = {'__name__': '__main__'}
+os.environ.setdefault('MPLBACKEND', 'Agg')
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+webbrowser.open = lambda *args, **kwargs: False
+webbrowser.open_new = lambda *args, **kwargs: False
+webbrowser.open_new_tab = lambda *args, **kwargs: False
+
+def sanitize_source(text):
+  return ''.join(
+    ch if ord(ch) < 0xD800 or ord(ch) > 0xDFFF else '\ufffd'
+    for ch in str(text or '')
+  )
+
+try:
+  import matplotlib
+  matplotlib.use('Agg', force=True)
+  import matplotlib.pyplot as plt
+  import matplotlib.figure as _matplotlib_figure
+  import matplotlib.backend_bases as _matplotlib_backend_bases
+except Exception:
+  matplotlib = None
+  plt = None
+  _matplotlib_figure = None
+  _matplotlib_backend_bases = None
+
+try:
+  import plotly.io as _plotly_io
+  import plotly.basedatatypes as _plotly_basedatatypes
+except Exception:
+  _plotly_io = None
+  _plotly_basedatatypes = None
+
+try:
+  from PIL import Image as _PIL_Image
+except Exception:
+  _PIL_Image = None
+
+try:
+  import numpy as _np
+except Exception:
+  _np = None
+
+try:
+  import cv2 as _cv2
+except Exception:
+  _cv2 = None
+
+try:
+  import bokeh.io as _bokeh_io
+except Exception:
+  _bokeh_io = None
+
+captured_visual_ids = globals_ns.setdefault('__nb_captured_visual_ids__', set())
+
+def capture_pending_visuals():
+  pending_outputs = globals_ns.setdefault('__nb_pending_outputs__', [])
+  capture_matplotlib_figures(pending_outputs)
+  if _plotly_basedatatypes is not None:
+    for global_value in list(globals_ns.values()):
+      capture_plotly_figure(global_value, pending_outputs)
+
+
+def capture_object(obj, outputs):
+  try:
+    # Plotly objects
+    if _plotly_basedatatypes is not None and isinstance(obj, _plotly_basedatatypes.BaseFigure):
+      return capture_plotly_figure(obj, outputs)
+
+    # Matplotlib Figure
+    if _matplotlib_figure is not None and isinstance(obj, _matplotlib_figure.Figure):
+      if id(obj) in captured_visual_ids:
+        return True
+      buffer = io.BytesIO()
+      obj.savefig(buffer, format='png', bbox_inches='tight', facecolor=obj.get_facecolor())
+      outputs.append({
+        'output_type': 'display_data',
+        'data': {'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'), 'text/plain': ['<matplotlib figure>']},
+        'metadata': {}
+      })
+      captured_visual_ids.add(id(obj))
+      return True
+
+    # PIL Image
+    if _PIL_Image is not None:
+      try:
+        if isinstance(obj, _PIL_Image.Image):
+          buffer = io.BytesIO()
+          obj.save(buffer, format='PNG')
+          outputs.append({
+            'output_type': 'display_data',
+            'data': {'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'), 'text/plain': ['<PIL image>']},
+            'metadata': {}
+          })
+          return True
+      except Exception:
+        pass
+
+    # numpy arrays as images
+    if _np is not None and isinstance(obj, _np.ndarray):
+      if _PIL_Image is not None:
+        try:
+          pil = _PIL_Image.fromarray(obj)
+          buffer = io.BytesIO()
+          pil.save(buffer, format='PNG')
+          outputs.append({
+            'output_type': 'display_data',
+            'data': {'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'), 'text/plain': ['<ndarray image>']},
+            'metadata': {}
+          })
+          return True
+        except Exception:
+          pass
+
+    # OpenCV images
+    if _cv2 is not None:
+      try:
+        import numpy as _maybe_np
+        if _maybe_np is not None and isinstance(obj, _maybe_np.ndarray):
+          if _PIL_Image is not None:
+            try:
+              pil = _PIL_Image.fromarray(obj[:, :, ::-1]) if obj.ndim == 3 else _PIL_Image.fromarray(obj)
+              buffer = io.BytesIO()
+              pil.save(buffer, format='PNG')
+              outputs.append({
+                'output_type': 'display_data',
+                'data': {'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'), 'text/plain': ['<cv2 image>']},
+                'metadata': {}
+              })
+              return True
+            except Exception:
+              pass
+      except Exception:
+        pass
+
+    # Rich repr HTML/Png/SVG
+    if hasattr(obj, '_repr_html_'):
+      try:
+        html = obj._repr_html_()
+        if html:
+          outputs.append({'output_type': 'display_data', 'data': {'text/html': [html], 'text/plain': [repr(obj)]}, 'metadata': {}})
+          return True
+      except Exception:
+        pass
+
+    if hasattr(obj, '_repr_png_'):
+      try:
+        png = obj._repr_png_()
+        if png:
+          if isinstance(png, bytes):
+            png = base64.b64encode(png).decode('ascii')
+          outputs.append({'output_type': 'display_data', 'data': {'image/png': png, 'text/plain': [repr(obj)]}, 'metadata': {}})
+          return True
+      except Exception:
+        pass
+
+    if hasattr(obj, '_repr_svg_'):
+      try:
+        svg = obj._repr_svg_()
+        if svg:
+          outputs.append({'output_type': 'display_data', 'data': {'image/svg+xml': [svg], 'text/plain': [repr(obj)]}, 'metadata': {}})
+          return True
+      except Exception:
+        pass
+
+    return False
+  except Exception:
+    return False
+
+
+def display(obj):
+  pending = globals_ns.setdefault('__nb_pending_outputs__', [])
+  captured = capture_object(obj, pending)
+  if not captured:
+    try:
+      pending.append({'output_type': 'execute_result', 'data': {'text/plain': [repr(obj)]}, 'metadata': {}})
+    except Exception:
+      pass
+
+globals_ns['display'] = display
+
+# Monkeypatch common libraries' show functions to route into notebook outputs
+try:
+  if _PIL_Image is not None:
+    def _pil_show(self, *a, **k):
+      return capture_object(self, globals_ns.setdefault('__nb_pending_outputs__', []))
+
+    _PIL_Image.Image.show = _pil_show
+except Exception:
+  pass
+
+try:
+  if _cv2 is not None:
+    def _cv2_imshow(winname, mat, *a, **k):
+      return capture_object(mat, globals_ns.setdefault('__nb_pending_outputs__', []))
+
+    _cv2.imshow = _cv2_imshow
+except Exception:
+  pass
+
+try:
+  if _bokeh_io is not None:
+    def _bokeh_show(obj, *a, **k):
+      # attempt to capture visuals produced by Bokeh objects
+      capture_pending_visuals()
+      return True
+
+    _bokeh_io.show = _bokeh_show
+except Exception:
+  pass
+
+if plt is not None:
+  def _nb_show(*args, **kwargs):
+    capture_pending_visuals()
+
+  plt.show = _nb_show
+
+  try:
+    plt.ioff()
+  except Exception:
+    pass
+
+if _matplotlib_figure is not None:
+  def _nb_figure_show(self, *args, **kwargs):
+    capture_pending_visuals()
+
+  _matplotlib_figure.Figure.show = _nb_figure_show
+
+if _matplotlib_backend_bases is not None:
+  def _nb_manager_show(self, *args, **kwargs):
+    capture_pending_visuals()
+
+  _matplotlib_backend_bases.FigureManagerBase.show = _nb_manager_show
+
+if _plotly_basedatatypes is not None:
+  def _plotly_show(self, *args, **kwargs):
+    capture_pending_visuals()
+
+  _plotly_basedatatypes.BaseFigure.show = _plotly_show
+
+if _plotly_io is not None:
+  _plotly_io.renderers.default = 'json'
+  _plotly_io.show = _plotly_show
+
+def capture_matplotlib_figures(outputs):
+  if plt is None:
+    return
+
+  for figure_number in list(plt.get_fignums()):
+    figure = plt.figure(figure_number)
+    if id(figure) in captured_visual_ids:
+      continue
+
+    buffer = io.BytesIO()
+    figure.savefig(buffer, format='png', bbox_inches='tight', facecolor=figure.get_facecolor())
+    outputs.append({
+      'output_type': 'display_data',
+      'data': {
+        'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'),
+        'text/plain': ['<matplotlib figure>']
+      },
+      'metadata': {}
+    })
+    captured_visual_ids.add(id(figure))
+
+  plt.close('all')
+
+def capture_plotly_figure(figure, outputs):
+  if _plotly_basedatatypes is None:
+    return False
+
+  if not isinstance(figure, _plotly_basedatatypes.BaseFigure):
+    return False
+
+  if id(figure) in captured_visual_ids:
+    return True
+
+  try:
+    html = figure.to_html(full_html=False, include_plotlyjs='cdn')
+  except Exception:
+    html = '<div>Plotly figure could not be rendered.</div>'
+
+  outputs.append({
+    'output_type': 'display_data',
+    'data': {
+      'text/html': [html],
+      'text/plain': ['<plotly figure>']
+    },
+    'metadata': {}
+  })
+  captured_visual_ids.add(id(figure))
+  return True
+
+def execute_cell(code):
+  stdout_buffer = io.StringIO()
+  stderr_buffer = io.StringIO()
+  payload = {'stdout': '', 'stderr': '', 'error': '', 'outputs': []}
+  globals_ns['__nb_pending_outputs__'] = payload['outputs']
+  code = sanitize_source(code)
+
+  try:
+    module = ast.parse(code, filename='<notebook-cell>', mode='exec')
+    body = module.body
+    last_expr = None
+
+    if body and isinstance(body[-1], ast.Expr):
+      last_expr = ast.Expression(body[-1].value)
+      body = body[:-1]
+
+    with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+      if body:
+        exec(
+          compile(ast.Module(body=body, type_ignores=[]), '<notebook-cell>', 'exec'),
+          globals_ns,
+          globals_ns
+        )
+
+      if last_expr is not None:
+        value = eval(compile(last_expr, '<notebook-cell>', 'eval'), globals_ns, globals_ns)
+        if value is not None:
+          if capture_plotly_figure(value, payload['outputs']):
+            value = None
+          elif plt is not None and hasattr(value, 'savefig') and hasattr(value, 'axes'):
+            figure = getattr(value, 'figure', value)
+            if id(figure) not in captured_visual_ids:
+              buffer = io.BytesIO()
+              figure.savefig(buffer, format='png', bbox_inches='tight', facecolor=figure.get_facecolor())
+              payload['outputs'].append({
+                'output_type': 'display_data',
+                'data': {
+                  'image/png': base64.b64encode(buffer.getvalue()).decode('ascii'),
+                  'text/plain': ['<matplotlib figure>']
+                },
+                'metadata': {}
+              })
+              captured_visual_ids.add(id(figure))
+              value = None
+
+          if value is not None:
+            if hasattr(value, '_repr_png_'):
+              try:
+                png_data = value._repr_png_()
+              except Exception:
+                png_data = None
+
+              if png_data:
+                if isinstance(png_data, bytes):
+                  png_data = base64.b64encode(png_data).decode('ascii')
+                payload['outputs'].append({
+                  'output_type': 'display_data',
+                  'data': {
+                    'image/png': png_data,
+                    'text/plain': ['<image>']
+                  },
+                  'metadata': {}
+                })
+                value = None
+
+          if value is not None:
+            print(repr(value))
+
+      capture_pending_visuals()
+  except Exception:
+    payload['error'] = traceback.format_exc()
+
+  payload['stdout'] = stdout_buffer.getvalue()
+  payload['stderr'] = stderr_buffer.getvalue()
+  globals_ns['__nb_pending_outputs__'] = []
+  return payload
+
+for raw_line in sys.stdin:
+  raw_line = raw_line.strip()
+  if not raw_line:
+    continue
+
+  try:
+    message = json.loads(raw_line)
+  except Exception:
+    continue
+
+  request_id = message.get('requestId')
+  command = message.get('command')
+
+  if command == 'execute':
+    result = execute_cell(message.get('code', ''))
+    sys.stdout.write(json.dumps({'requestId': request_id, 'ok': True, **result}, ensure_ascii=False) + '\n')
+    sys.stdout.flush()
+  elif command == 'shutdown':
+    sys.stdout.write(json.dumps({'requestId': request_id, 'ok': True}, ensure_ascii=False) + '\n')
+    sys.stdout.flush()
+    break
+`
+
+function normalizePathKey(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
+async function pathExists(targetPath) {
+  try {
+    const stats = await fs.stat(targetPath)
+    return stats.isFile() || stats.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+function buildPythonEnvironmentLabel(executablePath) {
+  const parts = String(executablePath || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+
+  const executableName = parts.at(-1) || basename(executablePath)
+  const parentName = parts.at(-2) || ''
+  const grandparentName = parts.at(-3) || ''
+
+  if (/^(bin|scripts)$/i.test(parentName)) {
+    return grandparentName || parentName || executableName
+  }
+
+  return parentName || executableName
+}
+
+async function addPythonCandidate(candidatePath, discovered, seen, source) {
+  const resolvedPath = resolve(String(candidatePath || ''))
+  const key = normalizePathKey(resolvedPath)
+
+  if (!resolvedPath || seen.has(key)) {
+    return
+  }
+
+  try {
+    const stats = await fs.stat(resolvedPath)
+    if (!stats.isFile() && !stats.isSymbolicLink()) {
+      return
+    }
+  } catch {
+    return
+  }
+
+  seen.add(key)
+  discovered.push({
+    label: buildPythonEnvironmentLabel(resolvedPath),
+    path: resolvedPath,
+    source
+  })
+}
+
+async function inspectPythonLocation(rootPath, discovered, seen, source) {
+  const normalizedRoot = resolve(String(rootPath || ''))
+  if (!normalizedRoot) return
+
+  try {
+    const stats = await fs.stat(normalizedRoot)
+    if (!stats.isDirectory()) {
+      await addPythonCandidate(normalizedRoot, discovered, seen, source)
+      return
+    }
+  } catch {
+    return
+  }
+
+  const candidateRoots = [
+    normalizedRoot,
+    join(normalizedRoot, 'bin'),
+    join(normalizedRoot, 'Scripts')
+  ]
+  for (const candidateRoot of candidateRoots) {
+    for (const executableName of PYTHON_EXECUTABLE_NAMES) {
+      await addPythonCandidate(join(candidateRoot, executableName), discovered, seen, source)
+    }
+  }
+
+  let entries = []
+  try {
+    entries = await fs.readdir(normalizedRoot, { withFileTypes: true })
+  } catch {
+    entries = []
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+
+    const childRoot = join(normalizedRoot, entry.name)
+    for (const candidateRoot of [childRoot, join(childRoot, 'bin'), join(childRoot, 'Scripts')]) {
+      for (const executableName of PYTHON_EXECUTABLE_NAMES) {
+        await addPythonCandidate(join(candidateRoot, executableName), discovered, seen, source)
+      }
+    }
+  }
+}
+
+async function collectPythonEnvironments(cwd) {
+  const discovered = []
+  const seen = new Set()
+  const home = homedir()
+  const roots = new Set()
+
+  const addRoot = (rootPath) => {
+    const value = String(rootPath || '').trim()
+    if (!value) return
+    roots.add(value)
+  }
+
+  String(process.env.PATH || '')
+    .split(process.platform === 'win32' ? ';' : ':')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .forEach(addRoot)
+
+  addRoot(cwd)
+  addRoot(join(cwd, '.venv'))
+  addRoot(join(cwd, 'venv'))
+  addRoot(join(cwd, 'env'))
+
+  if (process.platform === 'win32') {
+    if (process.env.LOCALAPPDATA) addRoot(join(process.env.LOCALAPPDATA, 'Programs', 'Python'))
+    if (process.env.PROGRAMFILES) addRoot(join(process.env.PROGRAMFILES, 'Python'))
+    if (process.env['ProgramFiles(x86)']) addRoot(join(process.env['ProgramFiles(x86)'], 'Python'))
+    addRoot(join(home, 'AppData', 'Local', 'Programs', 'Python'))
+    addRoot(join(home, 'AppData', 'Roaming', 'Python'))
+    addRoot(join(home, 'anaconda3'))
+    addRoot(join(home, 'miniconda3'))
+    addRoot(join(home, '.conda', 'envs'))
+    addRoot(join(home, 'AppData', 'Local', 'conda', 'conda', 'envs'))
+  } else {
+    addRoot('/usr/bin')
+    addRoot('/usr/local/bin')
+    addRoot('/opt/homebrew/bin')
+    addRoot(join(home, '.pyenv', 'versions'))
+    addRoot(join(home, '.local', 'share', 'virtualenvs'))
+    addRoot(join(home, 'miniconda3'))
+    addRoot(join(home, 'anaconda3'))
+    addRoot(join(home, 'miniforge3'))
+    addRoot(join(home, 'mambaforge'))
+  }
+
+  for (const rootPath of roots) {
+    await inspectPythonLocation(rootPath, discovered, seen, 'system')
+  }
+
+  return discovered.sort(
+    (left, right) => left.label.localeCompare(right.label) || left.path.localeCompare(right.path)
+  )
+}
+
+function buildNotebookSessionKey(notebookPath, interpreterPath) {
+  return `${normalizePathKey(notebookPath)}::${normalizePathKey(interpreterPath || 'python')}`
+}
+
+function resolveNotebookInterpreter(interpreterPath) {
+  const candidate = String(interpreterPath || '').trim()
+  return candidate || 'python'
+}
+
+function disposeNotebookSession(sessionKey) {
+  const session = notebookSessions.get(sessionKey)
+  if (!session) return
+
+  notebookSessions.delete(sessionKey)
+  session.pending.forEach(({ reject }) => {
+    reject(new Error('Notebook session stopped.'))
+  })
+  session.pending.clear()
+
+  try {
+    if (session.child && !session.child.killed) {
+      session.child.kill()
+    }
+  } catch {
+    // Ignore shutdown errors.
+  }
+}
+
+function createNotebookSession(interpreterPath, sessionKey) {
+  const executable = resolveNotebookInterpreter(interpreterPath)
+  const child = spawn(executable, ['-u', '-c', NOTEBOOK_WORKER_SCRIPT], {
+    env: {
+      ...process.env,
+      MPLBACKEND: 'Agg',
+      PLOTLY_RENDERER: 'json',
+      PYTHONUNBUFFERED: '1'
+    },
+    windowsHide: true,
+    shell: false
+  })
+
+  const session = {
+    child,
+    buffer: '',
+    pending: new Map()
+  }
+
+  const flushPendingWithError = (error) => {
+    session.pending.forEach(({ reject }) => reject(error))
+    session.pending.clear()
+  }
+
+  child.stdout.on('data', (chunk) => {
+    session.buffer += chunk.toString()
+
+    let newlineIndex = session.buffer.indexOf('\n')
+    while (newlineIndex >= 0) {
+      const rawLine = session.buffer.slice(0, newlineIndex).trim()
+      session.buffer = session.buffer.slice(newlineIndex + 1)
+      newlineIndex = session.buffer.indexOf('\n')
+
+      if (!rawLine) continue
+
+      let message = null
+      try {
+        message = JSON.parse(rawLine)
+      } catch (error) {
+        console.error('Failed to parse notebook worker output', error, rawLine)
+        continue
+      }
+
+      const pending = session.pending.get(String(message.requestId || ''))
+      if (!pending) continue
+
+      session.pending.delete(String(message.requestId || ''))
+      pending.resolve(message)
+    }
+  })
+
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim()
+    if (text) {
+      console.error('Notebook worker stderr:', text)
+    }
+  })
+
+  child.on('error', (error) => {
+    console.error('Notebook worker process error', error)
+    flushPendingWithError(error)
+    notebookSessions.delete(sessionKey)
+  })
+
+  child.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) {
+      console.error(`Notebook worker exited with code ${code}`)
+    }
+    if (signal) {
+      console.error(`Notebook worker exited with signal ${signal}`)
+    }
+    flushPendingWithError(new Error('Notebook session ended.'))
+    notebookSessions.delete(sessionKey)
+  })
+
+  notebookSessions.set(sessionKey, session)
+  return session
+}
+
+async function executeNotebookCellWithSession(payload) {
+  const notebookPath = String(payload?.notebookPath || '').trim()
+  const code = String(payload?.code || '')
+  const cwd = String(payload?.cwd || '').trim() || undefined
+  const interpreterPath = String(payload?.interpreterPath || '').trim()
+
+  if (!notebookPath) {
+    throw new Error('Notebook path is required')
+  }
+
+  const resolvedInterpreter = (await pathExists(interpreterPath)) ? interpreterPath : 'python'
+  const sessionKey = buildNotebookSessionKey(notebookPath, resolvedInterpreter)
+  let session = notebookSessions.get(sessionKey)
+
+  if (!session || session.child.killed) {
+    session = createNotebookSession(resolvedInterpreter, sessionKey)
+  }
+
+  const requestId = randomUUID()
+  const request = {
+    requestId,
+    command: 'execute',
+    code,
+    cwd
+  }
+
+  const result = await new Promise((resolve, reject) => {
+    session.pending.set(requestId, { resolve, reject })
+
+    const writeSucceeded = session.child.stdin.write(`${JSON.stringify(request)}\n`)
+    if (!writeSucceeded) {
+      session.child.stdin.once('drain', () => {})
+    }
+  })
+
+  return {
+    stdout: String(result?.stdout || ''),
+    stderr: String(result?.stderr || ''),
+    error: String(result?.error || ''),
+    outputs: Array.isArray(result?.outputs) ? result.outputs : []
+  }
+}
 
 function createWindow() {
   // Create the browser window.
@@ -27,6 +740,7 @@ function createWindow() {
   })
 
   mainWindow.on('ready-to-show', () => {
+    mainWindow.maximize()
     mainWindow.show()
   })
 
@@ -76,6 +790,16 @@ app.whenReady().then(() => {
     })
     if (canceled || filePaths.length === 0) return null
     return filePaths[0]
+  })
+
+  ipcMain.handle('python:listEnvironments', async (_, cwd) => {
+    try {
+      const discovered = await collectPythonEnvironments(String(cwd || ''))
+      return discovered
+    } catch (error) {
+      console.error('Failed to discover Python environments', error)
+      return []
+    }
   })
 
   ipcMain.handle('fs:readDir', async (_, dirPath) => {
@@ -475,6 +1199,10 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('notebook:executeCell', async (_, payload) => {
+    return await executeNotebookCellWithSession(payload)
+  })
+
   ipcMain.handle('shell:openExternal', async (_, targetPath) => {
     try {
       const url = pathToFileURL(String(targetPath || '')).toString()
@@ -845,6 +1573,12 @@ app.whenReady().then(() => {
   ipcMain.on('ping', () => console.log('pong'))
 
   createWindow()
+
+  app.on('before-quit', () => {
+    for (const sessionKey of notebookSessions.keys()) {
+      disposeNotebookSession(sessionKey)
+    }
+  })
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

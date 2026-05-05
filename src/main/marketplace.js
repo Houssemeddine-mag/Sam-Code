@@ -5,6 +5,9 @@ import { pathToFileURL } from 'url'
 
 const activatedPackages = new Map()
 
+const CATALOG_URL = 'https://samcode-26.web.app/catalog.json'
+const MARKETPLACE_BASE_URL = 'https://samcode-26.web.app'
+
 function getMarketplaceRoot() {
   return resolve(app.getAppPath(), 'marketplace')
 }
@@ -32,7 +35,14 @@ async function readJson(filePath) {
 }
 
 async function readCatalog() {
-  return await readJson(getCatalogPath())
+  try {
+    const response = await fetch(CATALOG_URL)
+    if (!response.ok) throw new Error(`Failed to fetch catalog: ${response.status}`)
+    return await response.json()
+  } catch (err) {
+    console.error('Failed to fetch catalog online, falling back to local if available:', err)
+    return await readJson(getCatalogPath())
+  }
 }
 
 async function getCatalogItem(packageId) {
@@ -46,14 +56,23 @@ async function readManifest(packageId) {
     throw new Error(`Unknown marketplace package: ${packageId}`)
   }
 
-  const manifestPath = resolve(getMarketplaceRoot(), item.path)
-  const manifest = await readJson(manifestPath)
+  const manifestUrl = `${MARKETPLACE_BASE_URL}/${item.path}`
+  let manifest
+  try {
+    const response = await fetch(manifestUrl)
+    if (!response.ok) throw new Error()
+    manifest = await response.json()
+  } catch (err) {
+    console.error('Failed to fetch manifest online, trying local', err)
+    const manifestPath = resolve(getMarketplaceRoot(), item.path)
+    manifest = await readJson(manifestPath)
+  }
 
   return {
     item,
     manifest,
-    manifestPath,
-    packageRoot: dirname(manifestPath)
+    manifestUrl,
+    packagePath: item.path
   }
 }
 
@@ -61,10 +80,33 @@ async function ensureInstalledRoot() {
   await fs.mkdir(getInstalledRoot(), { recursive: true })
 }
 
-async function copyPackageDirectory(sourceDir, destDir) {
+async function downloadFile(url, destPath) {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Failed to download ${url}: ${response.status}`)
+
+  const arrayBuffer = await response.arrayBuffer()
+  const buffer = Buffer.from(arrayBuffer)
+  await fs.writeFile(destPath, buffer)
+}
+
+async function downloadPackageDirectory(packagePath, destDir, manifest, files) {
   await fs.rm(destDir, { recursive: true, force: true })
   await fs.mkdir(destDir, { recursive: true })
-  await fs.cp(sourceDir, destDir, { recursive: true })
+
+  const packageBaseUrl = `${MARKETPLACE_BASE_URL}/${dirname(packagePath)}`
+
+  // We need to know which files to download since we can't 'dir' an HTTP server.
+  // The catalog or manifest needs to specify this, or we just download common ones.
+  // Assuming manifest and entry for now.
+  const filesToDownload = ['manifest.json', manifest.entry || 'index.mjs', 'README.md']
+
+  for (const file of filesToDownload) {
+    try {
+      await downloadFile(`${packageBaseUrl}/${file}`, join(destDir, file))
+    } catch (err) {
+      console.log(`Optional file not found: ${file}`)
+    }
+  }
 }
 
 async function writeInstalledRecord(installedPath, record) {
@@ -119,7 +161,7 @@ async function installPackage(packageId, visited = new Set()) {
   visited.add(packageId)
   await ensureInstalledRoot()
 
-  const { item, manifest, manifestPath, packageRoot } = await readManifest(packageId)
+  const { item, manifest, manifestUrl, packagePath } = await readManifest(packageId)
   const dependencies = Array.isArray(manifest.dependencies)
     ? manifest.dependencies
     : Array.isArray(item.requires)
@@ -131,14 +173,14 @@ async function installPackage(packageId, visited = new Set()) {
   }
 
   const installedPath = join(getInstalledRoot(), packageId)
-  await copyPackageDirectory(packageRoot, installedPath)
+  await downloadPackageDirectory(packagePath, installedPath, manifest)
 
   const record = {
     id: manifest.id || packageId,
     name: manifest.name || item.name || packageId,
     version: manifest.version || '1.0.0',
     type: manifest.type || item.type || 'package',
-    manifestPath,
+    manifestUrl,
     installedAt: new Date().toISOString(),
     installedPath,
     entry: manifest.entry || 'index.mjs',
@@ -151,7 +193,10 @@ async function installPackage(packageId, visited = new Set()) {
 
   await writeInstalledRecord(installedPath, record)
   activatedPackages.delete(packageId)
-  return record
+
+  // IPC cloning issue: do not send complex objects or Functions back to the renderer
+  const safeRecord = JSON.parse(JSON.stringify(record))
+  return safeRecord
 }
 
 async function loadPackageModule(packageId) {
@@ -196,7 +241,8 @@ async function activatePackage(packageId, context = {}) {
   }
 
   activatedPackages.set(packageId, packageState)
-  return packageState
+  // Ensure we send only serializable data over IPC
+  return JSON.parse(JSON.stringify(packageState))
 }
 
 export async function activateInstalledPackages(context = {}) {
@@ -242,11 +288,13 @@ export async function getMarketplacePackageState(packageId) {
   if (!record) return null
 
   const packageState = activatedPackages.get(packageId) || (await activatePackage(packageId))
-  return {
-    record,
-    activation: packageState.activation,
-    moduleExports: packageState.moduleExports
-  }
+  return JSON.parse(
+    JSON.stringify({
+      record,
+      activation: packageState.activation,
+      moduleExports: packageState.moduleExports
+    })
+  )
 }
 
 export async function getInstalledMarketplacePackages() {

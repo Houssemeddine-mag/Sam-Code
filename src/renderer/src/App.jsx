@@ -1,12 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+/* eslint-disable */
+import { useEffect, useRef, useState, useCallback } from 'react'
 import Editor from '@monaco-editor/react'
 import { loader } from '@monaco-editor/react'
 import * as monaco from 'monaco-editor'
 import {
   Bot,
   Binary,
-  ChevronDown,
-  ChevronRight,
   ChevronUp,
   FileArchive,
   FileCode,
@@ -58,6 +57,17 @@ function extractAgentPayload(responseText) {
   } catch {
     return null
   }
+}
+
+function safeParseNotebook(text) {
+  try {
+    const obj = JSON.parse(text || '{}')
+    if (typeof obj === 'object' && obj !== null && Array.isArray(obj.cells)) {
+      return obj
+    }
+  } catch (e) {}
+  // Return a default notebook structure
+  return { cells: [] }
 }
 
 function App() {
@@ -124,11 +134,11 @@ function App() {
   const [newNameInput, setNewNameInput] = useState('')
   const [selectedFolder, setSelectedFolder] = useState('')
   const [selectedExplorerPath, setSelectedExplorerPath] = useState('')
-  const [menuForPath, setMenuForPath] = useState('')
+  const [, setMenuForPath] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState('')
   const [deleteConfirmChoice, setDeleteConfirmChoice] = useState('delete')
-  const [showRenameModal, setShowRenameModal] = useState(false)
+  const [, setShowRenameModal] = useState(false)
   const [renameTarget, setRenameTarget] = useState('')
   const [renameNewName, setRenameNewName] = useState('')
   const [rateLimitedUntil, setRateLimitedUntil] = useState(0)
@@ -139,8 +149,20 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [rightWidth, setRightWidth] = useState(360)
   const [terminalHeight, setTerminalHeight] = useState(320)
+  const [activeNotebookCellIndex, setActiveNotebookCellIndex] = useState(null)
+  const [venvPath, setVenvPath] = useState('')
+  const [activeMenuIndex, setActiveMenuIndex] = useState(null)
+  const [runningNotebookCellIndex, setRunningNotebookCellIndex] = useState(null)
+  const [notebookCellHeights, setNotebookCellHeights] = useState({})
+  const [showPythonEnvironmentMenu, setShowPythonEnvironmentMenu] = useState(false)
+  const [pythonEnvironments, setPythonEnvironments] = useState([])
+  const [pythonEnvironmentsLoading, setPythonEnvironmentsLoading] = useState(false)
+  const [pythonEnvironmentsError, setPythonEnvironmentsError] = useState('')
 
   const layoutMetricsRef = useRef({ sidebarWidth: 280, rightWidth: 360, terminalHeight: 320 })
+  const notebookCellRefs = useRef([])
+  const notebookEditorRefs = useRef([])
+  const codeRef = useRef(code)
   const dragRef = useRef(null)
   const toastTimersRef = useRef(new Map())
 
@@ -162,6 +184,213 @@ function App() {
     return lines.map((line, index) => (index < lines.length - 1 ? `${line}\n` : line))
   }
 
+  const sanitizeNotebookExecutionText = (source) =>
+    String(source || '').replace(/[\uD800-\uDFFF]/g, '�')
+
+  const escapeHtml = (value) =>
+    String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+  const renderMarkdownPreviewHtml = (source) => {
+    const lines = String(source || '')
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+    const html = []
+    let listMode = false
+
+    const closeList = () => {
+      if (listMode) {
+        html.push('</ul>')
+        listMode = false
+      }
+    }
+
+    const formatInline = (text) =>
+      escapeHtml(text)
+        .replace(
+          /`([^`]+)`/g,
+          '<code class="rounded bg-white/10 px-1 py-0.5 text-[11px] text-cyan-100">$1</code>'
+        )
+        .replace(
+          /\[([^\]]+)\]\(([^)]+)\)/g,
+          '<a href="$2" target="_blank" rel="noreferrer" class="text-cyan-300 underline">$1</a>'
+        )
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+    lines.forEach((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) {
+        closeList()
+        html.push('<p class="my-2">&nbsp;</p>')
+        return
+      }
+
+      const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/)
+      if (headingMatch) {
+        closeList()
+        const level = Math.min(headingMatch[1].length, 6)
+        html.push(
+          `<h${level} class="mt-3 mb-2 font-semibold text-white">${formatInline(headingMatch[2])}</h${level}>`
+        )
+        return
+      }
+
+      if (/^[-*+]\s+/.test(trimmed)) {
+        if (!listMode) {
+          html.push('<ul class="my-2 list-disc space-y-1 pl-5 text-gray-100">')
+          listMode = true
+        }
+        html.push(`<li>${formatInline(trimmed.replace(/^[-*+]\s+/, ''))}</li>`)
+        return
+      }
+
+      closeList()
+      html.push(`<p class="my-2 leading-6 text-gray-100">${formatInline(trimmed)}</p>`)
+    })
+
+    closeList()
+    return html.join('')
+  }
+
+  const renderMarkdownNotebookDocument = (sourceHtml) => `
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #1f2937;
+        color: #f3f4f6;
+        font-family: Inter, system-ui, sans-serif;
+      }
+
+      body {
+        padding: 14px 16px 18px;
+        line-height: 1.65;
+        font-size: 14px;
+      }
+
+      .prose {
+        max-width: none;
+      }
+
+      h1, h2, h3, h4, h5, h6 {
+        color: #ffffff;
+      }
+
+      a {
+        color: #67e8f9;
+      }
+
+      code {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        padding: 0.1rem 0.25rem;
+        color: #ffffff;
+      }
+
+      p, li {
+        color: #f3f4f6;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="prose prose-invert max-w-none text-sm">${sourceHtml}</div>
+  </body>
+</html>
+`
+
+  const getNotebookDisplaySource = (cell) =>
+    Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || '')
+
+  const getNotebookEditorHeight = (cell, content, fallback = 180) => {
+    const baseLines = String(content || '').split('\n').length
+    const lineHeight = cell?.cell_type === 'code' ? 20 : 19
+    const padding = cell?.cell_type === 'code' ? 92 : 84
+    const minimum = cell?.cell_type === 'code' ? 180 : 160
+    return Math.max(minimum, baseLines * lineHeight + padding, fallback)
+  }
+
+  useEffect(() => {
+    codeRef.current = code
+  }, [code])
+
+  const formatNotebookOutput = (output) => {
+    // Handle stream outputs (stdout/stderr)
+    if (output.output_type === 'stream') {
+      return Array.isArray(output.text) ? output.text.join('') : String(output.text || '')
+    }
+    // Handle display_data (images, html, etc.) - show MIME type info
+    if (output.output_type === 'display_data') {
+      const mimeTypes = Object.keys(output.data || {})
+      if (mimeTypes.length === 0) return '(no data)'
+      return `[Display: ${mimeTypes.join(', ')}]`
+    }
+    // Handle error outputs
+    if (output.output_type === 'error') {
+      const traceback = Array.isArray(output.traceback)
+        ? output.traceback.join('\n')
+        : String(output.traceback || '')
+      return `${output.ename || 'Error'}: ${output.evalue || ''}\n${traceback}`
+    }
+    // Handle execute_result
+    if (output.output_type === 'execute_result') {
+      const mimeTypes = Object.keys(output.data || {})
+      if (mimeTypes.includes('text/plain')) {
+        return Array.isArray(output.data['text/plain'])
+          ? output.data['text/plain'].join('')
+          : String(output.data['text/plain'] || '')
+      }
+      return `[Result: ${mimeTypes.join(', ')}]`
+    }
+    // Fallback
+    return JSON.stringify(output, null, 2)
+  }
+
+  const renderNotebookDisplayOutput = (output, key) => {
+    const pngData = Array.isArray(output?.data?.['image/png'])
+      ? output.data['image/png'].join('')
+      : String(output?.data?.['image/png'] || '')
+    if (pngData) {
+      return (
+        <img
+          key={key}
+          src={`data:image/png;base64,${pngData}`}
+          alt="Notebook output"
+          className="max-h-130 w-auto max-w-full rounded border border-white/10 bg-black/40"
+        />
+      )
+    }
+
+    const htmlData = Array.isArray(output?.data?.['text/html'])
+      ? output.data['text/html'].join('')
+      : String(output?.data?.['text/html'] || '')
+    if (htmlData) {
+      return (
+        <iframe
+          key={key}
+          title="Notebook visual output"
+          className="h-130 w-full rounded border border-white/10 bg-[#111827]"
+          sandbox="allow-scripts allow-same-origin"
+          srcDoc={htmlData}
+        />
+      )
+    }
+
+    return (
+      <pre key={key} className="whitespace-pre-wrap text-xs">
+        {formatNotebookOutput(output)}
+      </pre>
+    )
+  }
+
   const updateNotebookDocument = (transform, successMessage) => {
     if (!activePath || !isNotebookFile(activePath)) {
       pushActivity('warning', 'Open a notebook before using notebook tools.')
@@ -169,13 +398,15 @@ function App() {
     }
 
     try {
-      const notebook = JSON.parse(code)
-      if (!notebook || typeof notebook !== 'object' || !Array.isArray(notebook.cells)) {
+      const notebook = safeParseNotebook(codeRef.current)
+      if (!notebook || !Array.isArray(notebook.cells)) {
         throw new Error('Invalid notebook JSON')
       }
 
       const nextNotebook = transform(notebook)
-      setCode(JSON.stringify(nextNotebook, null, 2))
+      const nextNotebookText = JSON.stringify(nextNotebook, null, 2)
+      codeRef.current = nextNotebookText
+      setCode(nextNotebookText)
       setStatus(successMessage)
       pushActivity('success', successMessage)
       return true
@@ -186,8 +417,28 @@ function App() {
     }
   }
 
-  const appendNotebookCell = (cellType, source, successMessage) => {
-    return updateNotebookDocument((notebook) => {
+  const getNotebookCells = useCallback(() => {
+    const notebook = safeParseNotebook(code)
+    return Array.isArray(notebook.cells) ? notebook.cells : null
+  }, [code])
+
+  const getPythonRunnerCommand = () => {
+    const pythonExecutable = String(venvPath || '').trim()
+    if (!pythonExecutable) {
+      return 'python -'
+    }
+
+    return `& "${pythonExecutable.replace(/"/g, '\\"')}" -`
+  }
+
+  const insertNotebookCell = (cellType, source, successMessage) => {
+    let insertedIndex = null
+    const succeeded = updateNotebookDocument((notebook) => {
+      const selectedIndex =
+        activeNotebookCellIndex != null && activeNotebookCellIndex >= 0
+          ? Math.min(activeNotebookCellIndex + 1, notebook.cells.length)
+          : notebook.cells.length
+
       const nextCell = {
         cell_type: cellType,
         metadata: {
@@ -201,11 +452,163 @@ function App() {
         nextCell.outputs = []
       }
 
+      insertedIndex = selectedIndex
+
       return {
         ...notebook,
-        cells: [...notebook.cells, nextCell]
+        cells: [
+          ...notebook.cells.slice(0, selectedIndex),
+          nextCell,
+          ...notebook.cells.slice(selectedIndex)
+        ]
       }
     }, successMessage)
+
+    if (succeeded && insertedIndex != null) {
+      setActiveNotebookCellIndex(insertedIndex)
+    }
+
+    return succeeded
+  }
+
+  const runNotebookCell = useCallback(
+    async (index) => {
+      if (!activePath || !isNotebookFile(activePath)) {
+        pushActivity('warning', 'Open a notebook before running cells.')
+        return false
+      }
+
+      const cells = getNotebookCells()
+      const cell = Array.isArray(cells) ? cells[index] : null
+      if (!cell || !['code', 'markdown'].includes(cell.cell_type)) {
+        pushActivity('warning', 'Select a notebook cell to run.')
+        return false
+      }
+
+      const script = (
+        Array.isArray(cell.source) ? cell.source.join('') : String(cell.source || '')
+      ).trim()
+      if (cell.cell_type === 'code' && !script) {
+        pushActivity('warning', 'The selected code cell is empty.')
+        return false
+      }
+
+      const sanitizedScript = sanitizeNotebookExecutionText(script)
+
+      setRunningNotebookCellIndex(index)
+      setStatus(`Running cell ${index + 1}...`)
+
+      try {
+        let outputs = []
+        if (cell.cell_type === 'markdown') {
+          const sourceText = getNotebookDisplaySource(cell)
+          const renderedHtml = renderMarkdownNotebookDocument(renderMarkdownPreviewHtml(sourceText))
+          outputs = [
+            {
+              output_type: 'display_data',
+              data: {
+                'text/plain': [sourceText],
+                'text/html': [renderedHtml],
+                'text/markdown': [sourceText]
+              },
+              metadata: {}
+            }
+          ]
+        } else {
+          const result = await window.api.executeNotebookCell({
+            notebookPath: activePath,
+            code: sanitizedScript,
+            cwd: rootFolder || dirnameFromPath(activePath),
+            interpreterPath: venvPath
+          })
+
+          outputs = Array.isArray(result?.outputs) ? result.outputs.slice() : []
+
+          if (result?.stdout) {
+            outputs.push({ output_type: 'stream', name: 'stdout', text: [String(result.stdout)] })
+          }
+          if (result?.stderr) {
+            outputs.push({
+              output_type: 'stream',
+              name: 'stderr',
+              text: [String(result.stderr)]
+            })
+          }
+          if (result?.error) {
+            const tracebackLines = String(result.error).split('\n').filter(Boolean)
+            outputs.push({
+              output_type: 'error',
+              ename: 'ExecutionError',
+              evalue: tracebackLines.at(-1) || 'Notebook execution failed',
+              traceback: tracebackLines
+            })
+          }
+        }
+
+        updateNotebookDocument(
+          (notebook) => {
+            const next = { ...notebook }
+            next.cells = next.cells.map((currentCell, currentIndex) =>
+              currentIndex === index
+                ? {
+                    ...currentCell,
+                    outputs,
+                    execution_count:
+                      currentCell.cell_type === 'code'
+                        ? (currentCell.execution_count || 0) + 1
+                        : (currentCell.execution_count ?? null)
+                  }
+                : currentCell
+            )
+            return next
+          },
+          `Ran cell ${index + 1}`
+        )
+
+        setStatus(
+          cell.cell_type === 'markdown'
+            ? `Rendered markdown cell ${index + 1}.`
+            : `Cell ${index + 1} finished.`
+        )
+        return true
+      } catch (error) {
+        setStatus('Cell run failed')
+        pushActivity('error', String(error?.message || error))
+        return false
+      } finally {
+        setRunningNotebookCellIndex((current) => (current === index ? null : current))
+      }
+    },
+    [
+      activePath,
+      venvPath,
+      rootFolder,
+      getNotebookCells,
+      sanitizeNotebookExecutionText,
+      isNotebookFile,
+      updateNotebookDocument
+    ]
+  )
+
+  const runAllNotebookCells = async () => {
+    const cells = getNotebookCells()
+    if (!cells) {
+      pushActivity('warning', 'Open a valid notebook first.')
+      return false
+    }
+
+    let ranAny = false
+    for (let index = 0; index < cells.length; index += 1) {
+      ranAny = true
+      await runNotebookCell(index)
+    }
+
+    if (!ranAny) {
+      pushActivity('warning', 'This notebook has no code cells to run.')
+      return false
+    }
+
+    return true
   }
 
   const clearNotebookOutputs = () => {
@@ -227,6 +630,199 @@ function App() {
       'Cleared notebook outputs.'
     )
   }
+
+  const deleteNotebookCell = (index) => {
+    const succeeded = updateNotebookDocument(
+      (notebook) => ({
+        ...notebook,
+        cells: notebook.cells.filter((_, currentIndex) => currentIndex !== index)
+      }),
+      `Deleted cell ${index + 1}`
+    )
+
+    if (succeeded) {
+      setActiveNotebookCellIndex((current) => {
+        if (current == null) return null
+        if (current > index) return current - 1
+        if (current === index) return Math.max(0, index - 1)
+        return current
+      })
+    }
+
+    return succeeded
+  }
+
+  const createPythonVirtualEnv = async () => {
+    if (!activePath) {
+      pushActivity('warning', 'Open a project folder before creating a virtual env.')
+      return false
+    }
+
+    const cwd = rootFolder || dirnameFromPath(activePath)
+    const selectedPythonExecutable = String(venvPath || '').trim()
+    setStatus('Creating Python virtual env...')
+
+    try {
+      const command = selectedPythonExecutable
+        ? `& "${selectedPythonExecutable.replace(/"/g, '\\"')}" -m venv .venv`
+        : 'python -m venv .venv'
+
+      const result = await window.api.runCommand({
+        type: 'command',
+        cwd,
+        shell: 'powershell',
+        command
+      })
+
+      if (result?.code !== 0) {
+        throw new Error(result?.stderr || result?.stdout || 'Failed to create virtual env')
+      }
+
+      const envPython = `${cwd}\\.venv\\Scripts\\python.exe`
+      setVenvPath(envPython)
+      setStatus(`Created virtual env at ${envPython}`)
+      pushActivity('success', 'Created and selected a new virtual env.')
+      return true
+    } catch (error) {
+      setStatus('Failed to create virtual env.')
+      pushActivity('error', `Virtual env creation failed: ${String(error?.message || error)}`)
+      return false
+    }
+  }
+
+  const choosePythonVirtualEnv = async () => {
+    if (!hasApi() || !window.api.listPythonEnvironments) {
+      pushActivity('warning', 'Python environment discovery is unavailable.')
+      return false
+    }
+
+    setShowPythonEnvironmentMenu(true)
+
+    try {
+      setPythonEnvironmentsLoading(true)
+      setPythonEnvironmentsError('')
+
+      const environments = await window.api.listPythonEnvironments(
+        rootFolder || dirnameFromPath(activePath) || ''
+      )
+      setPythonEnvironments(Array.isArray(environments) ? environments : [])
+
+      if (!Array.isArray(environments) || environments.length === 0) {
+        setPythonEnvironmentsError('No Python environments were found on this computer.')
+        pushActivity('warning', 'No Python environments were found on this computer.')
+      } else {
+        pushActivity(
+          'success',
+          `Found ${environments.length} Python environment${environments.length === 1 ? '' : 's'}.`
+        )
+      }
+    } catch (error) {
+      const message = String(error?.message || error)
+      setPythonEnvironmentsError(message)
+      pushActivity('error', `Failed to load Python environments: ${message}`)
+      return false
+    } finally {
+      setPythonEnvironmentsLoading(false)
+    }
+
+    return true
+  }
+
+  const selectPythonEnvironment = (environment) => {
+    const pythonPath = String(environment?.path || '').trim()
+    if (!pythonPath) return
+
+    setVenvPath(pythonPath)
+    setShowPythonEnvironmentMenu(false)
+    setStatus(`Selected Python executable: ${basenameFromPath(pythonPath)}`)
+    pushActivity(
+      'success',
+      `Selected Python environment: ${environment?.label || basenameFromPath(pythonPath)}`
+    )
+  }
+
+  const browsePythonExecutable = async () => {
+    if (!hasApi()) return false
+
+    const pythonPath = await window.api.openFile()
+    if (!pythonPath) return false
+
+    setVenvPath(pythonPath)
+    setShowPythonEnvironmentMenu(false)
+    setStatus(`Selected Python executable: ${basenameFromPath(pythonPath)}`)
+    pushActivity('success', `Selected virtual env or interpreter: ${basenameFromPath(pythonPath)}`)
+    return true
+  }
+
+  const activeIsNotebook = isNotebookFile(activePath)
+
+  useEffect(() => {
+    if (!activeIsNotebook || activeNotebookCellIndex == null) return undefined
+
+    const cellNode = notebookCellRefs.current[activeNotebookCellIndex]
+    const editor = notebookEditorRefs.current[activeNotebookCellIndex]
+
+    if (cellNode?.scrollIntoView) {
+      cellNode.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+
+    if (editor?.focus) {
+      editor.focus()
+    }
+
+    return undefined
+  }, [activeIsNotebook, activeNotebookCellIndex, code])
+
+  useEffect(() => {
+    if (!activeIsNotebook) {
+      setNotebookCellHeights({})
+    }
+  }, [activeIsNotebook])
+
+  useEffect(() => {
+    const handleNotebookShortcut = (event) => {
+      if (!activeIsNotebook || !activePath) return
+
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (target?.closest?.('.monaco-editor')) {
+        return
+      }
+
+      if (
+        event.shiftKey &&
+        event.key === 'Enter' &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        event.preventDefault()
+
+        const cells = getNotebookCells()
+        if (!cells || cells.length === 0) return
+
+        const selectedIndex =
+          activeNotebookCellIndex != null
+            ? activeNotebookCellIndex
+            : cells.findIndex((cell) => cell?.cell_type === 'code')
+
+        if (selectedIndex >= 0) {
+          runNotebookCell(selectedIndex)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handleNotebookShortcut)
+    return () => window.removeEventListener('keydown', handleNotebookShortcut)
+  }, [
+    activeIsNotebook,
+    activeNotebookCellIndex,
+    activePath,
+    code,
+    getNotebookCells,
+    rootFolder,
+    runNotebookCell,
+    venvPath
+  ])
 
   const installMarketplacePackage = (packageId) => {
     const packageDef = marketplaceCards.find((card) => card.id === packageId)
@@ -271,36 +867,8 @@ function App() {
     installInMain()
   }
 
-  const openLiveServerPreview = async () => {
-    if (!activePath || !isHtmlFile(activePath) || !hasApi()) {
-      pushActivity('warning', 'Open an HTML file first to use Live Server.')
-      return
-    }
-
-    try {
-      const liveServerPackage = await window.api.activateMarketplacePackage('live-server')
-      if (!liveServerPackage?.activation?.startServer) {
-        throw new Error('Live Server package is not properly activated')
-      }
-
-      const rootPath = dirnameFromPath(activePath)
-      const serverInfo = await liveServerPackage.activation.startServer(rootPath)
-
-      if (serverInfo?.url) {
-        setStatus(`Live Server started at ${serverInfo.url}`)
-        pushActivity('success', `Live Server started for ${basenameFromPath(activePath)}.`)
-      } else {
-        throw new Error('Server did not return a valid URL')
-      }
-    } catch (error) {
-      console.error('Live Server error:', error)
-      setStatus(`Failed to start Live Server: ${error.message}`)
-      pushActivity('error', `Live Server failed: ${error.message}`)
-    }
-  }
-
   const insertNotebookStarterCell = () => {
-    appendNotebookCell(
+    insertNotebookCell(
       'code',
       `import pandas as pd\nimport numpy as np\n\nframe = pd.DataFrame({\n    'value': np.arange(5)\n})\nframe`,
       'Inserted a notebook starter cell.'
@@ -308,7 +876,7 @@ function App() {
   }
 
   const insertMarkdownNotebookCell = () => {
-    appendNotebookCell(
+    insertNotebookCell(
       'markdown',
       '# Notebook Notes\n\nUse this space to explain the analysis or next steps.',
       'Inserted a markdown notebook cell.'
@@ -628,8 +1196,9 @@ function App() {
       /.(js|jsx|ts|tsx|mjs|cjs|css|scss|sass|html|htm|py|java|c|cpp|cs|go|rs|php|rb|sh|ps1|yml|yaml|md|txt|sql)$/.test(
         lower
       )
-    )
+    ) {
       return FileCode
+    }
     if (/\.(bat|cmd|ps1|sh)$/.test(lower)) return FileTerminal
     if (/\.(d\.ts)$/.test(lower)) return FileSymlink
     return Binary
@@ -855,7 +1424,28 @@ function App() {
     setShowCreateFile(false)
     setNewNameInput('')
     try {
-      const ok = await window.api.saveFile(fullPath, '')
+      let initialContent = ''
+      if (
+        String(fullPath || '')
+          .toLowerCase()
+          .endsWith('.ipynb')
+      ) {
+        const notebook = {
+          cells: [
+            {
+              cell_type: 'markdown',
+              metadata: { language: 'markdown' },
+              source: ['# New Notebook\n', 'This notebook was created by Sam Code.']
+            }
+          ],
+          metadata: {},
+          nbformat: 4,
+          nbformat_minor: 5
+        }
+        initialContent = JSON.stringify(notebook, null, 2)
+      }
+
+      const ok = await window.api.saveFile(fullPath, initialContent)
       if (ok) {
         pushActivity('success', `Created ${fullPath}`)
         await loadDirectory(targetBase)
@@ -1290,8 +1880,8 @@ function App() {
 
     if (lowerPath.endsWith('.ipynb')) {
       try {
-        const notebook = JSON.parse(code)
-        if (!notebook || typeof notebook !== 'object' || !Array.isArray(notebook.cells)) {
+        const notebook = safeParseNotebook(code)
+        if (!notebook || !Array.isArray(notebook.cells)) {
           return { type: 'invalid-notebook' }
         }
 
@@ -2058,50 +2648,16 @@ Rules:
   const activeTab = tabs.find((tab) => tab.path === activePath)
   const activeFileMissing = Boolean(activeTab?.missing)
   const packageInstallationSet = new Set(installedPackages)
-  const activeIsNotebook = isNotebookFile(activePath)
   const activeIsHtml = isHtmlFile(activePath)
-  const notebookRuntimeInstalled = packageInstallationSet.has('python-notebook-core')
-  const dataScienceInstalled = packageInstallationSet.has('data-science-pack')
-  const liveServerInstalled = packageInstallationSet.has('live-server')
-  const packageActionGroups = []
-
-  if (activeIsHtml && liveServerInstalled) {
-    packageActionGroups.push({
-      id: 'live-server',
-      title: 'Live Server',
-      description: 'Preview the active HTML file and expose the live reload workflow.',
-      actions: [
-        { label: 'Go Live', onClick: openLiveServerPreview, primary: true },
-        { label: 'Open preview', onClick: openLiveServerPreview }
-      ]
-    })
-  }
-
-  if (activeIsNotebook && notebookRuntimeInstalled) {
-    packageActionGroups.push({
-      id: 'python-notebook-core',
-      title: 'Notebook Core',
-      description: 'Run cells, extend the notebook JSON, and clear outputs.',
-      actions: [
-        { label: 'Run notebook', onClick: runCurrentFile, primary: true },
-        { label: 'Add code cell', onClick: insertNotebookStarterCell },
-        { label: 'Add markdown cell', onClick: insertMarkdownNotebookCell },
-        { label: 'Clear outputs', onClick: clearNotebookOutputs }
-      ]
-    })
-  }
-
-  if (activeIsNotebook && dataScienceInstalled) {
-    packageActionGroups.push({
-      id: 'data-science-pack',
-      title: 'Data Science Pack',
-      description: 'Unlock pandas and NumPy starter cells for analysis workflows.',
-      actions: [
-        { label: 'Insert analysis cell', onClick: insertNotebookStarterCell, primary: true },
-        { label: 'Insert notes cell', onClick: insertMarkdownNotebookCell }
-      ]
-    })
-  }
+  const notebookToolbarVisible = activeIsNotebook
+  const notebookCells = notebookToolbarVisible ? getNotebookCells() : null
+  const selectedNotebookCellIndex = Array.isArray(notebookCells)
+    ? activeNotebookCellIndex != null && activeNotebookCellIndex >= 0
+      ? activeNotebookCellIndex
+      : notebookCells.length > 0
+        ? 0
+        : -1
+    : -1
 
   const marketplaceCards = [
     {
@@ -2131,15 +2687,6 @@ Rules:
       badge: 'DS',
       accent: 'from-violet-500/20 to-fuchsia-500/10',
       deps: 'Installs notebook core + pandas/numpy'
-    },
-    {
-      id: 'live-server',
-      name: 'Live Server',
-      type: 'Plugin',
-      description: 'Preview HTML files locally and refresh them automatically while you edit.',
-      badge: 'LS',
-      accent: 'from-orange-500/20 to-amber-500/10',
-      deps: 'Requires the editor workspace'
     }
   ]
   const footerStatus = status
@@ -2447,7 +2994,7 @@ Rules:
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {sidebarOpen && (
             <>
@@ -2567,60 +3114,445 @@ Rules:
             <div className="min-h-0 flex-1">
               {activePath ? (
                 <div className="relative flex h-full min-h-0 flex-col">
-                  {packageActionGroups.length > 0 && (
+                  {notebookToolbarVisible && (
                     <div className="border-b border-black/70 bg-[#202020] px-4 py-3">
-                      <div className="flex flex-wrap items-center gap-3">
-                        {packageActionGroups.map((group) => (
-                          <div
-                            key={group.id}
-                            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-300">
+                          <span className="uppercase tracking-[0.2em]">Add cell</span>
+                          <select
+                            defaultValue=""
+                            onChange={(event) => {
+                              const value = event.target.value
+                              if (value === 'code') {
+                                insertNotebookCell(
+                                  'code',
+                                  "import pandas as pd\nimport numpy as np\n\nframe = pd.DataFrame({\n    'value': np.arange(5)\n})\nframe",
+                                  'Inserted a code cell.'
+                                )
+                              }
+                              if (value === 'markdown') {
+                                insertNotebookCell(
+                                  'markdown',
+                                  '# Notebook Notes\n\nUse this space to explain the analysis or next steps.',
+                                  'Inserted a markdown cell.'
+                                )
+                              }
+                              event.target.value = ''
+                            }}
+                            className="rounded border border-white/10 bg-[#111827] px-2 py-1 text-xs text-white outline-none"
                           >
-                            <div className="text-xs font-semibold uppercase tracking-[0.25em] text-gray-400">
-                              {group.title}
-                            </div>
-                            <div className="mt-1 text-xs text-gray-400">{group.description}</div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {group.actions.map((action) => (
+                            <option value="" disabled>
+                              Choose
+                            </option>
+                            <option value="code">Code cell</option>
+                            <option value="markdown">Markdown cell</option>
+                          </select>
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={() => runAllNotebookCells()}
+                          className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/20"
+                        >
+                          Run all cells
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (selectedNotebookCellIndex >= 0) {
+                              runNotebookCell(selectedNotebookCellIndex)
+                            }
+                          }}
+                          className="rounded-full bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-cyan-400"
+                        >
+                          Run selected cell
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => clearNotebookOutputs()}
+                          className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/20"
+                        >
+                          Clear all outputs
+                        </button>
+
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={choosePythonVirtualEnv}
+                            className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/10"
+                          >
+                            Set python virtual env
+                          </button>
+
+                          {showPythonEnvironmentMenu && (
+                            <div className="absolute right-0 top-full z-30 mt-2 w-[24rem] rounded-xl border border-white/10 bg-[#0f172a] p-3 shadow-2xl shadow-black/30">
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="text-xs uppercase tracking-[0.2em] text-gray-400">
+                                    Python environments
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-gray-500">
+                                    Choose an interpreter or create a new venv in the current
+                                    project.
+                                  </div>
+                                </div>
                                 <button
-                                  key={action.label}
                                   type="button"
-                                  onClick={action.onClick}
-                                  className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${action.primary ? 'bg-cyan-500 text-black hover:bg-cyan-400' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                                  onClick={async () => {
+                                    await choosePythonVirtualEnv()
+                                  }}
+                                  className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white hover:bg-white/10"
                                 >
-                                  {action.label}
+                                  Refresh
                                 </button>
-                              ))}
+                              </div>
+
+                              <div className="mt-3 flex flex-col gap-2">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await createPythonVirtualEnv()
+                                  }}
+                                  className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-left text-xs text-cyan-100 hover:bg-cyan-500/20"
+                                >
+                                  Create venv in current folder
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={browsePythonExecutable}
+                                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-gray-200 hover:bg-white/10"
+                                >
+                                  Browse for Python executable
+                                </button>
+                              </div>
+
+                              <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-white/10 bg-black/20 p-2">
+                                {pythonEnvironmentsLoading ? (
+                                  <div className="px-3 py-2 text-xs text-gray-400">
+                                    Scanning Python environments...
+                                  </div>
+                                ) : pythonEnvironments.length > 0 ? (
+                                  pythonEnvironments.map((environment) => {
+                                    const selected =
+                                      String(environment.path || '') === String(venvPath || '')
+                                    return (
+                                      <button
+                                        key={environment.path}
+                                        type="button"
+                                        onClick={() => selectPythonEnvironment(environment)}
+                                        className={`mb-2 w-full rounded-lg border px-3 py-2 text-left transition-colors last:mb-0 ${selected ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-white/10 bg-white/5 hover:bg-white/10'}`}
+                                      >
+                                        <div className="flex items-center justify-between gap-2">
+                                          <div className="text-sm font-medium text-white">
+                                            {environment.label}
+                                          </div>
+                                          {selected && (
+                                            <div className="rounded-full bg-cyan-500 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-black">
+                                              Selected
+                                            </div>
+                                          )}
+                                        </div>
+                                        <div className="mt-1 break-all text-[11px] text-gray-400">
+                                          {environment.path}
+                                        </div>
+                                      </button>
+                                    )
+                                  })
+                                ) : (
+                                  <div className="px-3 py-2 text-xs text-gray-400">
+                                    {pythonEnvironmentsError ||
+                                      'No Python environments were found. Try browsing for an interpreter or creating a new venv.'}
+                                  </div>
+                                )}
+                              </div>
                             </div>
+                          )}
+                        </div>
+
+                        {venvPath && (
+                          <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-300">
+                            {basenameFromPath(venvPath)}
                           </div>
-                        ))}
+                        )}
                       </div>
                     </div>
                   )}
 
-                  <div className="relative min-h-0 flex-1">
-                    <Editor
-                      height="100%"
-                      theme="vs-dark"
-                      language={activeLanguage}
-                      value={code}
-                      onChange={(value) => setCode(value ?? '')}
-                      options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true }}
-                    />
-                    {fileLoading && (
-                      <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-black/70 px-3 py-1.5 text-xs text-gray-200 shadow-lg">
-                        Loading file...
-                      </div>
+                  <div className="relative min-h-0 flex-1 overflow-auto p-4">
+                    {activeIsNotebook ? (
+                      (() => {
+                        try {
+                          const notebook = safeParseNotebook(code || '{}')
+                          if (!notebook || !Array.isArray(notebook.cells))
+                            throw new Error('Invalid')
+
+                          const updateCellSource = (index, newText) => {
+                            updateNotebookDocument(
+                              (nb) => {
+                                const next = { ...nb }
+                                next.cells = next.cells.map((c, i) =>
+                                  i === index
+                                    ? {
+                                        ...c,
+                                        source: normalizeNotebookSource(String(newText || ''))
+                                      }
+                                    : c
+                                )
+                                return next
+                              },
+                              `Updated cell ${index + 1}`
+                            )
+                          }
+
+                          return (
+                            <div className="space-y-6">
+                              {notebook.cells.map((cell, idx) => (
+                                <div
+                                  key={idx}
+                                  ref={(node) => {
+                                    notebookCellRefs.current[idx] = node
+                                  }}
+                                  onMouseDown={() => setActiveNotebookCellIndex(idx)}
+                                  className={`rounded-lg border p-4 ${activeNotebookCellIndex === idx ? 'border-cyan-500/40 bg-white/6 ring-1 ring-cyan-500/20' : 'border-white/8 bg-white/3'}`}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="text-xs text-gray-300">
+                                      {cell.cell_type === 'code'
+                                        ? `In [${cell.execution_count ?? ''}]`
+                                        : 'Markdown'}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      {runningNotebookCellIndex === idx && (
+                                        <div className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-100">
+                                          Running...
+                                        </div>
+                                      )}
+                                      <div className="relative">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setActiveMenuIndex(activeMenuIndex === idx ? null : idx)
+                                          }
+                                          className="rounded bg-cyan-500 px-2 py-1 text-xs font-semibold text-black"
+                                        >
+                                          {activeMenuIndex === idx ? '▲' : 'Run'}
+                                        </button>
+                                        {activeMenuIndex === idx && (
+                                          <div className="absolute right-0 z-10 mt-2 w-24 rounded-md border border-white/20 bg-white/10">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                runNotebookCell(idx)
+                                                setActiveMenuIndex(null)
+                                              }}
+                                              className="block w-full px-2 py-2 text-left text-xs hover:bg-white/20"
+                                            >
+                                              Run
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                deleteNotebookCell(idx)
+                                                setActiveMenuIndex(null)
+                                              }}
+                                              className="block w-full px-2 py-2 text-left text-xs hover:bg-white/20"
+                                            >
+                                              Delete
+                                            </button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-3">
+                                    <Editor
+                                      height={
+                                        notebookCellHeights[idx] ||
+                                        getNotebookEditorHeight(
+                                          cell,
+                                          getNotebookDisplaySource(cell),
+                                          cell.cell_type === 'code' ? 220 : 180
+                                        )
+                                      }
+                                      theme="vs-dark"
+                                      language={
+                                        cell?.metadata?.language ||
+                                        (cell.cell_type === 'code' ? 'python' : 'markdown')
+                                      }
+                                      value={
+                                        Array.isArray(cell.source)
+                                          ? cell.source.join('')
+                                          : String(cell.source || '')
+                                      }
+                                      onMount={(editor) => {
+                                        notebookEditorRefs.current[idx] = editor
+                                        const updateNotebookCellHeight = () => {
+                                          const nextHeight = getNotebookEditorHeight(
+                                            cell,
+                                            editor.getValue(),
+                                            cell.cell_type === 'code' ? 220 : 180
+                                          )
+                                          setNotebookCellHeights((current) => {
+                                            if (current[idx] === nextHeight) {
+                                              return current
+                                            }
+
+                                            return { ...current, [idx]: nextHeight }
+                                          })
+                                        }
+
+                                        updateNotebookCellHeight()
+                                        editor.onDidContentSizeChange(updateNotebookCellHeight)
+                                        if (cell.cell_type === 'code') {
+                                          editor.addCommand(
+                                            monaco.KeyMod.Shift | monaco.KeyCode.Enter,
+                                            () => {
+                                              runNotebookCell(idx)
+                                            }
+                                          )
+                                        }
+                                        if (activeNotebookCellIndex === idx) {
+                                          editor.focus()
+                                        }
+                                      }}
+                                      onFocus={() => setActiveNotebookCellIndex(idx)}
+                                      onChange={(v) => updateCellSource(idx, v)}
+                                      options={{
+                                        minimap: { enabled: false },
+                                        fontSize: 13,
+                                        automaticLayout: true,
+                                        wordWrap: 'on',
+                                        scrollBeyondLastLine: false,
+                                        scrollbar: {
+                                          vertical: 'hidden',
+                                          horizontal: 'hidden',
+                                          alwaysConsumeMouseWheel: false
+                                        }
+                                      }}
+                                    />
+                                  </div>
+
+                                  {Array.isArray(cell.outputs) && cell.outputs.length > 0 && (
+                                    <div className="mt-3 rounded border border-white/6 bg-black/50 p-3 text-sm text-gray-200">
+                                      {cell.outputs.map((out, oi) => {
+                                        if (
+                                          out?.output_type === 'display_data' ||
+                                          out?.output_type === 'execute_result'
+                                        ) {
+                                          return renderNotebookDisplayOutput(out, oi)
+                                        }
+
+                                        return (
+                                          <pre key={oi} className="whitespace-pre-wrap text-xs">
+                                            {formatNotebookOutput(out)}
+                                          </pre>
+                                        )
+                                      })}
+                                    </div>
+                                  )}
+
+                                  {runningNotebookCellIndex === idx &&
+                                    (!Array.isArray(cell.outputs) || cell.outputs.length === 0) && (
+                                      <div className="mt-3 rounded border border-cyan-500/20 bg-cyan-500/5 p-3 text-xs text-cyan-100">
+                                        Running cell...
+                                      </div>
+                                    )}
+
+                                  {typeof notebookCellHeights[idx] === 'number' && (
+                                    <div
+                                      style={{ display: 'none' }}
+                                      data-height={notebookCellHeights[idx]}
+                                    />
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        } catch (e) {
+                          return (
+                            <div>
+                              <div className="text-sm text-red-400">
+                                Failed to render notebook: {String(e?.message || e)}
+                              </div>
+                              <Editor
+                                height="100%"
+                                theme="vs-dark"
+                                language={activeLanguage}
+                                value={code}
+                                onChange={(value) => setCode(value ?? '')}
+                                options={{
+                                  minimap: { enabled: false },
+                                  fontSize: 14,
+                                  automaticLayout: true
+                                }}
+                              />
+                            </div>
+                          )
+                        }
+                      })()
+                    ) : (
+                      <>
+                        <Editor
+                          height="100%"
+                          theme="vs-dark"
+                          language={activeLanguage}
+                          value={code}
+                          onChange={(value) => setCode(value ?? '')}
+                          options={{
+                            minimap: { enabled: false },
+                            fontSize: 14,
+                            automaticLayout: true
+                          }}
+                        />
+                        {fileLoading && (
+                          <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-black/70 px-3 py-1.5 text-xs text-gray-200 shadow-lg">
+                            Loading file...
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
               ) : (
-                <div className="flex h-full flex-col items-center justify-center px-6 text-center text-gray-400">
-                  <Bot size={44} className="mb-4 opacity-50" />
-                  <h2 className="mb-2 text-2xl font-semibold text-white">Sam Code</h2>
-                  <p className="max-w-md">
-                    Open a folder or file to begin. The editor stays blank until you pick something
-                    from the explorer.
-                  </p>
+                <div className="flex h-full flex-col items-center pt-24 text-center text-gray-400 bg-transparent">
+                  <Bot size={56} className="mb-6 text-blue-500 opacity-80" />
+                  <h2 className="mb-8 text-3xl font-semibold text-white">Welcome to Sam Code</h2>
+                  <div className="flex flex-col gap-4 max-w-sm w-full text-left bg-black/20 p-6 rounded-xl border border-white/10 shadow-lg">
+                    <button
+                      type="button"
+                      onClick={openFileDialog}
+                      className="text-left text-blue-400 hover:text-blue-300 hover:underline transition-colors text-sm font-medium"
+                    >
+                      Open file
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openFolder}
+                      className="text-left text-blue-400 hover:text-blue-300 hover:underline transition-colors text-sm font-medium"
+                    >
+                      Open folder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMarketplaceOpen(true)}
+                      className="text-left text-blue-400 hover:text-blue-300 hover:underline transition-colors text-sm font-medium"
+                    >
+                      Browse for extensions
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettingsSection('api')
+                        setSettingsOpen(true)
+                      }}
+                      className="text-left text-blue-400 hover:text-blue-300 hover:underline transition-colors text-sm font-medium"
+                    >
+                      Add your api for sam code
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -3163,7 +4095,7 @@ Rules:
                         )}
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.id}>
-                          {model.name}
+                          {model}
                         </option>
                       ))}
                     </select>
