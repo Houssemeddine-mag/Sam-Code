@@ -20,6 +20,32 @@ function getCdCommand(shell, cwd) {
   return `Set-Location -LiteralPath '${escapeForPowerShell(target)}'\r\n`
 }
 
+function normalizeTerminalUrl(text) {
+  return String(text || '')
+    .trim()
+    .replace(/[),.;:!?]+$/g, '')
+}
+
+function extractTerminalUrls(text) {
+  const urls = []
+  const pattern = /https?:\/\/[^\s<>'"`]+/gi
+  const source = String(text || '')
+  let match = null
+
+  while ((match = pattern.exec(source)) !== null) {
+    const rawText = normalizeTerminalUrl(match[0])
+    if (!rawText) continue
+
+    urls.push({
+      rawText,
+      start: match.index + 1,
+      end: match.index + rawText.length
+    })
+  }
+
+  return urls
+}
+
 function TerminalSession({ session, cwd, active, pushActivity }) {
   const containerRef = useRef(null)
   const terminalRef = useRef(null)
@@ -29,6 +55,7 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
   const sessionIdRef = useRef(session.id)
   const dataDisposeRef = useRef(null)
   const exitDisposeRef = useRef(null)
+  const linkProviderDisposeRef = useRef(null)
   const initializedRef = useRef(false)
   const previousCwdRef = useRef(cwd)
   const [status, setStatus] = useState('Starting terminal...')
@@ -99,6 +126,11 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
       exitDisposeRef.current = null
     }
 
+    if (linkProviderDisposeRef.current) {
+      linkProviderDisposeRef.current.dispose()
+      linkProviderDisposeRef.current = null
+    }
+
     if (terminalRef.current) {
       terminalRef.current.dispose()
       terminalRef.current = null
@@ -142,6 +174,46 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
       terminal.open(containerRef.current)
       terminalRef.current = terminal
       fitAddonRef.current = fitAddon
+
+      linkProviderDisposeRef.current = terminal.registerLinkProvider({
+        provideLinks: (bufferLineNumber, callback) => {
+          const activeBuffer = terminal.buffer?.active
+          const line = activeBuffer?.getLine(bufferLineNumber - 1)
+          if (!line) {
+            callback(undefined)
+            return
+          }
+
+          const lineText = line.translateToString(true)
+          const links = extractTerminalUrls(lineText).map((entry) => ({
+            range: {
+              start: { x: entry.start, y: bufferLineNumber },
+              end: { x: entry.end, y: bufferLineNumber }
+            },
+            text: entry.rawText,
+            decorations: {
+              pointerCursor: true,
+              underline: true
+            },
+            activate: async (_event, text) => {
+              const url = normalizeTerminalUrl(text)
+              if (url) {
+                await window.api.openExternal(url)
+              }
+            },
+            hover: (event, text) => {
+              if (event.ctrlKey || event.metaKey) {
+                setStatus(`Ctrl+click to open: ${normalizeTerminalUrl(text)}`)
+              }
+            },
+            leave: () => {
+              setStatus(`Running ${session.shell} in ${resolvedCwd || 'home'}`)
+            }
+          }))
+
+          callback(links.length ? links : undefined)
+        }
+      })
 
       const created = await window.api.createTerminal({
         sessionId: session.id,

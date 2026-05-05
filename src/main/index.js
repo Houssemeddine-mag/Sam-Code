@@ -27,6 +27,12 @@ import traceback
 import webbrowser
 
 globals_ns = {'__name__': '__main__'}
+try:
+  sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+  sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
+  sys.stdin.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+  pass
 os.environ.setdefault('MPLBACKEND', 'Agg')
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 webbrowser.open = lambda *args, **kwargs: False
@@ -69,6 +75,21 @@ except Exception:
   _np = None
 
 try:
+  import pandas as _pd
+except Exception:
+  _pd = None
+
+try:
+  import seaborn as _sns
+except Exception:
+  _sns = None
+
+try:
+  import plotly.express as _plotly_express
+except Exception:
+  _plotly_express = None
+
+try:
   import cv2 as _cv2
 except Exception:
   _cv2 = None
@@ -79,6 +100,17 @@ except Exception:
   _bokeh_io = None
 
 captured_visual_ids = globals_ns.setdefault('__nb_captured_visual_ids__', set())
+
+if _np is not None:
+  globals_ns['np'] = _np
+if _pd is not None:
+  globals_ns['pd'] = _pd
+if _sns is not None:
+  globals_ns['sns'] = _sns
+if plt is not None:
+  globals_ns['plt'] = plt
+if _plotly_express is not None:
+  globals_ns['px'] = _plotly_express
 
 def capture_pending_visuals():
   pending_outputs = globals_ns.setdefault('__nb_pending_outputs__', [])
@@ -228,8 +260,8 @@ except Exception:
 try:
   if _bokeh_io is not None:
     def _bokeh_show(obj, *a, **k):
-      # attempt to capture visuals produced by Bokeh objects
-      capture_pending_visuals()
+      pending = globals_ns.setdefault('__nb_pending_outputs__', [])
+      capture_object(obj, pending)
       return True
 
     _bokeh_io.show = _bokeh_show
@@ -261,7 +293,8 @@ if _matplotlib_backend_bases is not None:
 
 if _plotly_basedatatypes is not None:
   def _plotly_show(self, *args, **kwargs):
-    capture_pending_visuals()
+    pending = globals_ns.setdefault('__nb_pending_outputs__', [])
+    capture_object(self, pending)
 
   _plotly_basedatatypes.BaseFigure.show = _plotly_show
 
@@ -319,10 +352,12 @@ def capture_plotly_figure(figure, outputs):
   return True
 
 def execute_cell(code):
+  global captured_visual_ids
   stdout_buffer = io.StringIO()
   stderr_buffer = io.StringIO()
   payload = {'stdout': '', 'stderr': '', 'error': '', 'outputs': []}
   globals_ns['__nb_pending_outputs__'] = payload['outputs']
+  captured_visual_ids = globals_ns['__nb_captured_visual_ids__'] = set()
   code = sanitize_source(code)
 
   try:
@@ -620,6 +655,8 @@ function createNotebookSession(interpreterPath, sessionKey) {
     buffer: '',
     pending: new Map()
   }
+  // record which interpreter binary this session uses so we can clean it up
+  session.interpreter = executable
 
   const flushPendingWithError = (error) => {
     session.pending.forEach(({ reject }) => reject(error))
@@ -888,6 +925,44 @@ app.whenReady().then(() => {
 
   ipcMain.handle('fs:delete', async (_, targetPath) => {
     try {
+      const resolvedTarget = resolve(String(targetPath || ''))
+
+      // Dispose any notebook sessions using an interpreter inside the target path
+      for (const sessionKey of Array.from(notebookSessions.keys())) {
+        const session = notebookSessions.get(sessionKey)
+        try {
+          const interp = String(session?.interpreter || '')
+          if (interp) {
+            const rel = relative(resolvedTarget, resolve(interp))
+            if (rel && !rel.startsWith('..')) {
+              disposeNotebookSession(sessionKey)
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      // Dispose any terminal sessions whose cwd is inside the target path
+      for (const sessionId of Array.from(terminalSessions.keys())) {
+        const session = terminalSessions.get(sessionId)
+        try {
+          const sessionCwd = String(session?.cwd || '')
+          if (sessionCwd) {
+            const rel = relative(resolvedTarget, resolve(sessionCwd))
+            if (rel && !rel.startsWith('..')) {
+              try {
+                disposeTerminalSession(sessionId)
+              } catch (e) {
+                // ignore
+              }
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
       await fs.rm(String(targetPath || ''), { recursive: true, force: true })
       return true
     } catch (e) {
@@ -1127,7 +1202,8 @@ app.whenReady().then(() => {
       terminalSessions.delete(sessionId)
     })
 
-    terminalSessions.set(sessionId, { terminal })
+    // keep cwd for potential cleanup when deleting folders
+    terminalSessions.set(sessionId, { terminal, cwd })
     return { sessionId }
   })
 
@@ -1205,7 +1281,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle('shell:openExternal', async (_, targetPath) => {
     try {
-      const url = pathToFileURL(String(targetPath || '')).toString()
+      const target = String(targetPath || '').trim()
+      const url = /^https?:\/\//i.test(target) ? target : pathToFileURL(target).toString()
       await shell.openExternal(url)
       return true
     } catch (error) {
