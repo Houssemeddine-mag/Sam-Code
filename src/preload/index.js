@@ -25,6 +25,8 @@ const api = {
   listMarketplacePackages: () => ipcRenderer.invoke('marketplace:listInstalledPackages'),
   installMarketplacePackage: (packageId) =>
     ipcRenderer.invoke('marketplace:installPackage', packageId),
+  uninstallMarketplacePackage: (packageId) =>
+    ipcRenderer.invoke('marketplace:uninstallPackage', packageId),
   activateMarketplacePackage: (packageId) =>
     ipcRenderer.invoke('marketplace:activatePackage', packageId),
   activateInstalledMarketplacePackages: () =>

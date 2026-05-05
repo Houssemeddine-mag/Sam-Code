@@ -26,68 +26,18 @@ import {
 } from 'lucide-react'
 import TerminalDock from './TerminalDock'
 
-loader.config({ monaco })
-
 const STORAGE_KEYS = {
-  apiKey: 'samcode.apiKey',
-  apiProvider: 'samcode.apiProvider',
-  selectedModel: 'samcode.selectedModel',
-  preferredModels: 'samcode.preferredModels',
-  appearanceMode: 'samcode.appearanceMode',
-  installedPackages: 'samcode.installedPackages'
+  apiKey: 'samcode:apiKey',
+  apiProvider: 'samcode:apiProvider',
+  selectedModel: 'samcode:selectedModel',
+  appearanceMode: 'samcode:appearanceMode',
+  preferredModels: 'samcode:preferredModels',
+  installedPackages: 'samcode:installedPackages'
 }
 
-const DEFAULT_PREFERRED_MODELS = ['']
-
-function extractAgentPayload(responseText) {
-  const jsonFenceMatch = responseText.match(/```json\s*([\s\S]*?)```/i)
-  const rawJson = (jsonFenceMatch?.[1] || responseText || '').trim()
-
-  if (!rawJson) {
-    return null
-  }
-
-  try {
-    const parsed = JSON.parse(rawJson)
-    if (!parsed || typeof parsed !== 'object') return null
-    return {
-      summary: String(parsed.summary || '').trim(),
-      operations: Array.isArray(parsed.operations) ? parsed.operations : []
-    }
-  } catch {
-    return null
-  }
-}
-
-function safeParseNotebook(text) {
-  try {
-    const obj = JSON.parse(text || '{}')
-    if (typeof obj === 'object' && obj !== null && Array.isArray(obj.cells)) {
-      return obj
-    }
-  } catch (e) {}
-  // Return a default notebook structure
-  return { cells: [] }
-}
+const DEFAULT_PREFERRED_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
 
 function App() {
-  const [code, setCode] = useState(
-    '// Welcome to Sam Code\n\nOpen a folder to start browsing files.'
-  )
-  const [mode, setMode] = useState('chat')
-  const [messages, setMessages] = useState([])
-  const [input, setInput] = useState('')
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEYS.apiKey) || '')
-  const [apiProvider, setApiProvider] = useState(
-    () => localStorage.getItem(STORAGE_KEYS.apiProvider) || 'auto'
-  )
-  const [selectedModel, setSelectedModel] = useState(
-    () => localStorage.getItem(STORAGE_KEYS.selectedModel) || ''
-  )
-  const [availableModels, setAvailableModels] = useState([])
-  const [modelsLoading, setModelsLoading] = useState(false)
-  const [modelsError, setModelsError] = useState('')
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState('preferences')
   const [showFileMenu, setShowFileMenu] = useState(false)
   const [showModeMenu, setShowModeMenu] = useState(false)
@@ -129,6 +79,196 @@ function App() {
   const [fileLoading, setFileLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const generationAbortRef = useRef(null)
+  const editorMainRef = useRef(null)
+  const [code, setCode] = useState('')
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEYS.apiKey) || '')
+  const [apiProvider, setApiProvider] = useState(
+    () => localStorage.getItem(STORAGE_KEYS.apiProvider) || 'auto'
+  )
+  const [selectedModel, setSelectedModel] = useState(
+    () => localStorage.getItem(STORAGE_KEYS.selectedModel) || ''
+  )
+  const [mode, setMode] = useState('chat')
+  const [input, setInput] = useState('')
+  const [messages, setMessages] = useState([])
+  const [availableModels, setAvailableModels] = useState([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  useEffect(() => {
+    // Register/unregister Java helpers only when the 'java-language' extension is installed
+    const isInstalled = Array.isArray(installedPackages)
+      ? installedPackages.includes('java-language')
+      : false
+
+    try {
+      if (!monaco) return
+
+      // dispose previously registered helpers if extension was removed
+      if (!isInstalled && globalThis.__samcode_java_monaco_disposables) {
+        try {
+          for (const d of globalThis.__samcode_java_monaco_disposables) {
+            try {
+              d.dispose()
+            } catch {}
+          }
+        } finally {
+          globalThis.__samcode_java_monaco_disposables = undefined
+          globalThis.__samcode_java_monaco_registered = false
+        }
+      }
+
+      if (isInstalled && !globalThis.__samcode_java_monaco_registered) {
+        const disposables = []
+
+        const completion = monaco.languages.registerCompletionItemProvider('java', {
+          provideCompletionItems: async (model, position) => {
+            const lineContent = model
+              .getLineContent(position.lineNumber)
+              .substring(0, position.column)
+            const snippets = [
+              {
+                label: 'main',
+                kind: monaco.languages.CompletionItemKind.Snippet,
+                insertText: ['public static void main(String[] args) {', '\t$0', '}'].join('\n'),
+                insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                documentation: 'Main method'
+              },
+              {
+                label: 'sysout',
+                kind: monaco.languages.CompletionItemKind.Snippet,
+                insertText: 'System.out.println($1);',
+                insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                documentation: 'System.out.println()'
+              },
+              {
+                label: 'fori',
+                kind: monaco.languages.CompletionItemKind.Snippet,
+                insertText: ['for (int i = 0; i < ${1:count}; i++) {', '\t$0', '}'].join('\n'),
+                insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                documentation: 'Classic for-loop'
+              }
+            ]
+
+            // Add AI-powered suggestions if API is configured
+            const suggestions = [...snippets]
+            if (selectedModel && apiKey && lineContent.trim().length > 0) {
+              try {
+                // Get context: current file and surrounding lines
+                const currentCode = model.getValue()
+                const contextStart = Math.max(0, position.lineNumber - 5)
+                const contextEnd = Math.min(model.getLineCount(), position.lineNumber + 3)
+                const contextLines = []
+                for (let i = contextStart; i <= contextEnd; i++) {
+                  contextLines.push(model.getLineContent(i))
+                }
+                const context = contextLines.join('\n')
+
+                // Call AI API for code completion
+                const effectiveProvider = String(apiProvider || 'auto').trim()
+                const key = String(apiKey || '').trim()
+
+                if (effectiveProvider === 'auto' || effectiveProvider === 'openrouter') {
+                  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${key}`
+                    },
+                    body: JSON.stringify({
+                      model: selectedModel,
+                      messages: [
+                        {
+                          role: 'system',
+                          content:
+                            'You are a Java code completion assistant. Provide only code suggestions, no explanations.'
+                        },
+                        {
+                          role: 'user',
+                          content: `Complete this Java code:\n\n${context}\n\nProvide only the next line(s) of code to complete the current line.`
+                        }
+                      ],
+                      max_tokens: 100,
+                      temperature: 0.3
+                    })
+                  })
+
+                  if (response.ok) {
+                    const data = await response.json()
+                    const aiSuggestion = data.choices?.[0]?.message?.content?.trim()
+                    if (aiSuggestion && aiSuggestion.length < 150) {
+                      suggestions.push({
+                        label: 'AI Suggest',
+                        kind: monaco.languages.CompletionItemKind.Text,
+                        insertText: aiSuggestion,
+                        documentation: 'AI-powered suggestion'
+                      })
+                    }
+                  }
+                }
+              } catch (e) {
+                console.log('AI completion error:', e.message)
+              }
+            }
+
+            return { suggestions }
+          }
+        })
+        disposables.push(completion)
+
+        const formatter = monaco.languages.registerDocumentFormattingEditProvider('java', {
+          provideDocumentFormattingEdits: (model /*, options, token */) => {
+            const full = model.getValue()
+            // Proper Java formatting:
+            // 1. Normalize line endings
+            let formatted = full.replace(/\r\n/g, '\n')
+            // 2. Trim trailing whitespace from each line
+            formatted = formatted
+              .split('\n')
+              .map((line) => line.replace(/\s+$/g, ''))
+              .join('\n')
+            // 3. Fix spacing around braces and operators
+            formatted = formatted
+              .replace(/\s*{\s*/g, ' {\n')
+              .replace(/}\s*/g, '}\n')
+              .replace(/;\s*/g, ';\n')
+            // 4. Collapse multiple empty lines into single newlines
+            formatted = formatted.replace(/\n\n+/g, '\n\n')
+            // 5. Remove trailing newlines and add single newline at EOF
+            formatted = formatted.trim() + '\n'
+            // 6. Fix indentation (basic: 4 spaces per level)
+            const lines = formatted.split('\n')
+            let indentLevel = 0
+            formatted = lines
+              .map((line) => {
+                const trimmed = line.trim()
+                if (!trimmed) return ''
+                // Decrease indent for closing braces
+                if (trimmed.startsWith('}')) indentLevel = Math.max(0, indentLevel - 1)
+                const indented = ' '.repeat(indentLevel * 4) + trimmed
+                // Increase indent after opening braces
+                if (trimmed.endsWith('{') || trimmed.endsWith('{\\n')) indentLevel++
+                return indented
+              })
+              .join('\n')
+
+            return [
+              {
+                range: model.getFullModelRange(),
+                text: formatted
+              }
+            ]
+          }
+        })
+        disposables.push(formatter)
+
+        globalThis.__samcode_java_monaco_disposables = disposables
+        globalThis.__samcode_java_monaco_registered = true
+      }
+    } catch (e) {
+      console.error('Failed to register/unregister java helpers', e)
+    }
+  }, [installedPackages, monaco])
   const [showCreateFile, setShowCreateFile] = useState(false)
   const [showCreateFolder, setShowCreateFolder] = useState(false)
   const [newNameInput, setNewNameInput] = useState('')
@@ -145,6 +285,7 @@ function App() {
   const [status, setStatus] = useState('')
   const [toasts, setToasts] = useState([])
   const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalCommand, setTerminalCommand] = useState('')
   const [showAgentPanel, setShowAgentPanel] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [rightWidth, setRightWidth] = useState(360)
@@ -194,6 +335,47 @@ function App() {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;')
+
+  const extractAgentPayload = (responseText) => {
+    if (!responseText) return null
+
+    const text = String(responseText).trim()
+
+    // Try to extract JSON from code blocks (```json ... ```)
+    const jsonBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    let jsonStr = jsonBlockMatch ? jsonBlockMatch[1].trim() : text
+
+    // Try to find JSON object that starts with { and ends with }
+    const jsonObjectMatch = jsonStr.match(/\{[\s\S]*\}/)
+    if (jsonObjectMatch) {
+      jsonStr = jsonObjectMatch[0]
+    }
+
+    try {
+      const payload = JSON.parse(jsonStr)
+      const operations = Array.isArray(payload.operations) ? payload.operations : []
+      const summary = String(payload.summary || '').trim() || 'Agent operation completed.'
+
+      return {
+        operations,
+        summary
+      }
+    } catch (e) {
+      return null
+    }
+  }
+
+  const safeParseNotebook = (jsonStr) => {
+    try {
+      const parsed = JSON.parse(String(jsonStr || '{}'))
+      if (parsed && typeof parsed === 'object') {
+        return parsed
+      }
+      return { cells: [] }
+    } catch (e) {
+      return { cells: [] }
+    }
+  }
 
   const renderMarkdownPreviewHtml = (source) => {
     const lines = String(source || '')
@@ -833,7 +1015,13 @@ function App() {
         if (window.api?.installMarketplacePackage) {
           await window.api.installMarketplacePackage(packageId)
           const installedPackagesFromMain = await window.api.listMarketplacePackages()
-          setInstalledPackages(installedPackagesFromMain.map((record) => record.id).filter(Boolean))
+
+          // Ensure installedPackagesFromMain is an array before mapping
+          const packageIds = Array.isArray(installedPackagesFromMain)
+            ? installedPackagesFromMain.map((record) => record?.id).filter(Boolean)
+            : []
+
+          setInstalledPackages(packageIds)
           setStatus(`${packageDef.name} installed.`)
           pushActivity('success', `${packageDef.name} installed and activated.`)
           return
@@ -858,13 +1046,47 @@ function App() {
         setStatus(`${packageDef.name} installed.`)
         pushActivity('success', `${packageDef.name} installed and ready.`)
       } catch (error) {
-        console.error(error)
+        console.error('Install error:', error)
         pushActivity('error', `Failed to install ${packageDef.name}: ${error.message}`)
         setStatus(`Failed to install ${packageDef.name}.`)
       }
     }
 
     installInMain()
+  }
+
+  const uninstallMarketplacePackage = (packageId) => {
+    const packageDef = marketplaceCards.find((card) => card.id === packageId)
+    if (!packageDef) return
+
+    const uninstallInMain = async () => {
+      try {
+        if (window.api?.uninstallMarketplacePackage) {
+          await window.api.uninstallMarketplacePackage(packageId)
+          const installedPackagesFromMain = await window.api.listMarketplacePackages()
+
+          // Ensure installedPackagesFromMain is an array before mapping
+          const packageIds = Array.isArray(installedPackagesFromMain)
+            ? installedPackagesFromMain.map((record) => record?.id).filter(Boolean)
+            : []
+
+          setInstalledPackages(packageIds)
+          setStatus(`${packageDef.name} removed.`)
+          pushActivity('success', `${packageDef.name} uninstalled.`)
+          return
+        }
+
+        setInstalledPackages((current) => current.filter((id) => id !== packageId))
+        setStatus(`${packageDef.name} removed.`)
+        pushActivity('success', `${packageDef.name} removed from the marketplace list.`)
+      } catch (error) {
+        console.error('Uninstall error:', error)
+        pushActivity('error', `Failed to remove ${packageDef.name}: ${error.message}`)
+        setStatus(`Failed to remove ${packageDef.name}.`)
+      }
+    }
+
+    uninstallInMain()
   }
 
   const insertNotebookStarterCell = () => {
@@ -1953,12 +2175,29 @@ function App() {
     }
 
     if (lowerPath.endsWith('.java')) {
-      const fileName = basenameFromPath(activePath).replace(/\.java$/, '')
+      // Extract the public class name from the Java file
+      const javaCodeContent = String(code || '').trim()
+      // Match: public [modifiers] class ClassName
+      const publicClassMatch = javaCodeContent.match(
+        /public\s+(?:final\s+)?(?:abstract\s+)?(?:static\s+)?class\s+(\w+)/
+      )
+      let className = publicClassMatch ? publicClassMatch[1] : null
+
+      // If no public class found, try to find any class
+      if (!className) {
+        const anyClassMatch = javaCodeContent.match(
+          /(?:public\s+)?(?:final\s+)?(?:abstract\s+)?(?:static\s+)?class\s+(\w+)/
+        )
+        className = anyClassMatch
+          ? anyClassMatch[1]
+          : basenameFromPath(activePath).replace(/\.java$/, '')
+      }
+
       return {
         type: 'command',
         cwd,
         shell: 'powershell',
-        command: `javac "${activePath}"; if ($?) { java "${fileName}" }`
+        command: `javac "${activePath}" 2>&1; if ($LASTEXITCODE -eq 0) { java -cp "." "${className}" } else { Write-Host "Compilation failed"; exit 1 }`
       }
     }
 
@@ -2077,31 +2316,18 @@ function App() {
     setStatus(`Running ${fname}...`)
 
     try {
-      if (plan.background) {
-        window.api.runCommand(plan).catch((error) => {
-          setStatus(`Run failed for ${fname}.`)
-          pushActivity('error', error.message)
-        })
-        setStatus(`Launched ${fname} in the background.`)
+      // Set the command to run in the terminal
+      if (plan.command) {
+        setTerminalCommand(plan.command)
         setTerminalOpen(true)
-        return
+        // For background tasks, also run via runCommand
+        if (plan.background) {
+          window.api.runCommand(plan).catch((error) => {
+            setStatus(`Run failed for ${fname}.`)
+            pushActivity('error', error.message)
+          })
+        }
       }
-
-      const result = await window.api.runCommand(plan)
-      if (result?.code === 0) {
-        setStatus(`Finished running ${fname}.`)
-        setTerminalOpen(true)
-        return
-      }
-
-      const errorText = (
-        result?.stderr ||
-        result?.stdout ||
-        `Process exited with code ${result?.code ?? 'unknown'}`
-      ).trim()
-      setStatus(`Run failed for ${fname}.`)
-      pushActivity('error', errorText || `Run failed for ${fname}.`)
-      setTerminalOpen(true)
     } catch (error) {
       setStatus(`Run failed for ${fname}.`)
       pushActivity('error', error.message)
@@ -2687,6 +2913,15 @@ Rules:
       badge: 'DS',
       accent: 'from-violet-500/20 to-fuchsia-500/10',
       deps: 'Installs notebook core + pandas/numpy'
+    },
+    {
+      id: 'java-language',
+      name: 'Java Language Support',
+      type: 'Extension',
+      description: 'Adds Java snippets, lightweight formatting, and editor helpers for Java files.',
+      badge: 'JV',
+      accent: 'from-orange-500/20 to-amber-500/10',
+      deps: 'Editor helper package'
     }
   ]
   const footerStatus = status
@@ -3102,15 +3337,6 @@ Rules:
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={runCurrentFile}
-              disabled={!activePath || activeFileMissing}
-              className="rounded px-1.5 py-0.5 text-xs font-semibold text-gray-300 transition-colors hover:bg-[#3c3c3c] hover:text-white disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
-            >
-              Run
-            </button>
-
             <div className="min-h-0 flex-1">
               {activePath ? (
                 <div className="relative flex h-full min-h-0 flex-col">
@@ -3495,11 +3721,45 @@ Rules:
                       })()
                     ) : (
                       <>
+                        {activePath && activePath.toLowerCase().endsWith('.java') && (
+                          <div className="bg-[#1e1e1e] border-b border-white/10 px-4 py-2 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  if (editorMainRef.current && editorMainRef.current.getAction) {
+                                    await editorMainRef.current
+                                      .getAction('editor.action.formatDocument')
+                                      .run()
+                                    setStatus('Formatted Java file')
+                                    pushActivity('success', 'Formatted Java file')
+                                  }
+                                } catch (e) {
+                                  console.error('Format failed', e)
+                                  pushActivity('error', 'Format failed: ' + (e?.message || e))
+                                }
+                              }}
+                              className="rounded px-2 py-1 text-xs font-semibold text-gray-300 bg-[#2d2d2d] hover:bg-[#3c3c3c] hover:text-white transition-colors"
+                            >
+                              Format
+                            </button>
+                            <button
+                              type="button"
+                              onClick={runCurrentFile}
+                              className="rounded px-2 py-1 text-xs font-semibold text-gray-300 bg-[#2d2d2d] hover:bg-[#3c3c3c] hover:text-white transition-colors"
+                            >
+                              Run
+                            </button>
+                          </div>
+                        )}
                         <Editor
                           height="100%"
                           theme="vs-dark"
                           language={activeLanguage}
                           value={code}
+                          onMount={(editor) => {
+                            editorMainRef.current = editor
+                          }}
                           onChange={(value) => setCode(value ?? '')}
                           options={{
                             minimap: { enabled: false },
@@ -3783,6 +4043,8 @@ Rules:
             cwd={rootFolder}
             onClose={() => setTerminalOpen(false)}
             pushActivity={pushActivity}
+            command={terminalCommand}
+            onCommandExecuted={() => setTerminalCommand('')}
           />
         </div>
       </div>
@@ -3891,11 +4153,14 @@ Rules:
                         </div>
                         <button
                           type="button"
-                          onClick={() => installMarketplacePackage(item.id)}
-                          disabled={installedPackages.includes(item.id)}
+                          onClick={() =>
+                            installedPackages.includes(item.id)
+                              ? uninstallMarketplacePackage(item.id)
+                              : installMarketplacePackage(item.id)
+                          }
                           className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-gray-400"
                         >
-                          {installedPackages.includes(item.id) ? 'Installed' : 'Install'}
+                          {installedPackages.includes(item.id) ? 'Remove' : 'Install'}
                         </button>
                       </div>
                     </article>
@@ -4095,7 +4360,7 @@ Rules:
                         )}
                       {availableModels.map((model) => (
                         <option key={model.id} value={model.id}>
-                          {model}
+                          {model.id}
                         </option>
                       ))}
                     </select>

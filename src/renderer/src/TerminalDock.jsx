@@ -326,12 +326,13 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
   )
 }
 
-function TerminalDock({ open, cwd, onClose, pushActivity }) {
+function TerminalDock({ open, cwd, onClose, pushActivity, command, onCommandExecuted }) {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
   const [defaultShell, setDefaultShell] = useState('powershell')
   const nextIndexRef = useRef(1)
   const resolvedCwd = String(cwd || '').trim()
+  const pendingCommandRef = useRef('')
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || sessions[0],
@@ -381,6 +382,40 @@ function TerminalDock({ open, cwd, onClose, pushActivity }) {
       setActiveSessionId(sessions[0].id)
     }
   }, [activeSessionId, open, sessions])
+
+  useEffect(() => {
+    if (command && command.trim()) {
+      pendingCommandRef.current = command.trim()
+      // Create a terminal session if none exist
+      if (sessions.length === 0) {
+        const index = nextIndexRef.current++
+        const id = `terminal-${Date.now()}-${index}`
+        const newSession = {
+          id,
+          title: `Terminal ${index}`,
+          shell: defaultShell,
+          cwd: resolvedCwd
+        }
+        setSessions([newSession])
+        setActiveSessionId(id)
+      }
+    }
+  }, [command, defaultShell, resolvedCwd, sessions.length])
+
+  useEffect(() => {
+    if (
+      pendingCommandRef.current &&
+      activeSessionId &&
+      sessions.some((s) => s.id === activeSessionId)
+    ) {
+      const cmd = pendingCommandRef.current.trim()
+      pendingCommandRef.current = ''
+
+      // Write the command to the active terminal session
+      window.api.writeTerminal(activeSessionId, cmd + '\r\n')
+      onCommandExecuted?.()
+    }
+  }, [activeSessionId, sessions, onCommandExecuted])
 
   const closeSession = (sessionId) => {
     setSessions((current) => {

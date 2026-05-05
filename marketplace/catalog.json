@@ -33,6 +33,13 @@
       "description": "Preview HTML files locally and refresh the browser automatically.",
       "path": "packages/live-server/manifest.json",
       "requires": ["python-notebook-core"]
+    },
+    {
+      "id": "java-language",
+      "name": "Java Language Support",
+      "type": "extension",
+      "description": "Adds Java snippets, lightweight formatting, and editor helpers for Java files.",
+      "path": "packages/java-language/manifest.json"
     }
   ]
 }

@@ -25,6 +25,13 @@
       "description": "Installs notebook core, pandas, NumPy and common data science tools together.",
       "path": "packages/data-science-pack/manifest.json",
       "requires": ["python-notebook-core", "pandas-numpy"]
+    },
+    {
+      "id": "java-language",
+      "name": "Java Language Support",
+      "type": "extension",
+      "description": "Adds Java snippets, lightweight formatting, and editor helpers for Java files.",
+      "path": "packages/java-language/manifest.json"
     }
   ]
 }
