@@ -7,6 +7,7 @@ import {
   Bot,
   Binary,
   ChevronUp,
+  ChevronRight,
   FileArchive,
   FileCode,
   FileImage,
@@ -18,6 +19,7 @@ import {
   FileVideoCamera,
   Folder,
   FolderOpen,
+  RefreshCw,
   Search,
   Store,
   PanelLeft,
@@ -269,11 +271,12 @@ function App() {
       console.error('Failed to register/unregister java helpers', e)
     }
   }, [installedPackages, monaco])
-  const [showCreateFile, setShowCreateFile] = useState(false)
-  const [showCreateFolder, setShowCreateFolder] = useState(false)
-  const [newNameInput, setNewNameInput] = useState('')
+  const [activeMenuIndex, setActiveMenuIndex] = useState(null)
+  const [runningNotebookCellIndex, setRunningNotebookCellIndex] = useState(null)
   const [selectedFolder, setSelectedFolder] = useState('')
   const [selectedExplorerPath, setSelectedExplorerPath] = useState('')
+  const [selectedPaths, setSelectedPaths] = useState(new Set())
+  const [draggedItems, setDraggedItems] = useState(null)
   const [, setMenuForPath] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState('')
@@ -292,8 +295,6 @@ function App() {
   const [terminalHeight, setTerminalHeight] = useState(320)
   const [activeNotebookCellIndex, setActiveNotebookCellIndex] = useState(null)
   const [venvPath, setVenvPath] = useState('')
-  const [activeMenuIndex, setActiveMenuIndex] = useState(null)
-  const [runningNotebookCellIndex, setRunningNotebookCellIndex] = useState(null)
   const [notebookCellHeights, setNotebookCellHeights] = useState({})
   const [showPythonEnvironmentMenu, setShowPythonEnvironmentMenu] = useState(false)
   const [pythonEnvironments, setPythonEnvironments] = useState([])
@@ -303,6 +304,7 @@ function App() {
   const layoutMetricsRef = useRef({ sidebarWidth: 280, rightWidth: 360, terminalHeight: 320 })
   const notebookCellRefs = useRef([])
   const notebookEditorRefs = useRef([])
+  const suppressNextNotebookScroll = useRef(false)
   const codeRef = useRef(code)
   const dragRef = useRef(null)
   const toastTimersRef = useRef(new Map())
@@ -779,15 +781,23 @@ function App() {
       return false
     }
 
-    let ranAny = false
+    const runnableIndices = []
     for (let index = 0; index < cells.length; index += 1) {
-      ranAny = true
-      await runNotebookCell(index)
+      const cell = cells[index]
+      if (cell && ['code', 'markdown'].includes(cell.cell_type)) {
+        runnableIndices.push(index)
+      }
     }
 
-    if (!ranAny) {
-      pushActivity('warning', 'This notebook has no code cells to run.')
+    if (runnableIndices.length === 0) {
+      pushActivity('warning', 'This notebook has no runnable cells to run.')
       return false
+    }
+
+    for (const index of runnableIndices) {
+      // run sequentially to preserve order
+      // eslint-disable-next-line no-await-in-loop
+      await runNotebookCell(index)
     }
 
     return true
@@ -944,12 +954,17 @@ function App() {
     const cellNode = notebookCellRefs.current[activeNotebookCellIndex]
     const editor = notebookEditorRefs.current[activeNotebookCellIndex]
 
-    if (cellNode?.scrollIntoView) {
-      cellNode.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
+    if (suppressNextNotebookScroll.current) {
+      // consume the suppression flag and do not scroll/focus
+      suppressNextNotebookScroll.current = false
+    } else {
+      if (cellNode?.scrollIntoView) {
+        cellNode.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
 
-    if (editor?.focus) {
-      editor.focus()
+      if (editor?.focus) {
+        editor.focus()
+      }
     }
 
     return undefined
@@ -988,7 +1003,14 @@ function App() {
             : cells.findIndex((cell) => cell?.cell_type === 'code')
 
         if (selectedIndex >= 0) {
-          runNotebookCell(selectedIndex)
+          suppressNextNotebookScroll.current = true
+          ;(async () => {
+            const ok = await runNotebookCell(selectedIndex)
+            if (ok) {
+              const next = selectedIndex + 1 < cells.length ? selectedIndex + 1 : selectedIndex
+              setActiveNotebookCellIndex(next)
+            }
+          })()
         }
       }
     }
@@ -1426,57 +1448,89 @@ function App() {
     return Binary
   }
 
-  const explorerToneForPath = (item, isOpen = false) => {
+  const explorerToneForPath = (item) => {
     if (item.isDirectory) {
-      return {
-        accent: isOpen ? 'bg-blue-500/15 text-blue-300' : 'bg-amber-500/15 text-amber-300',
-        badge: 'DIR'
-      }
+      return { iconColor: 'text-gray-400' }
     }
 
     const lower = item.name.toLowerCase()
+
+    // Web files
+    if (/\.html?$/.test(lower)) return { iconColor: 'text-green-500', badge: 'HTML' }
+    if (/\.css$/.test(lower)) return { iconColor: 'text-purple-500', badge: 'CSS' }
+    if (/\.(js|jsx|mjs|cjs)$/.test(lower)) return { iconColor: 'text-yellow-500', badge: 'JS' }
+    if (/\.ts$/.test(lower)) return { iconColor: 'text-blue-600', badge: 'TS' }
+    if (/\.tsx?$/.test(lower)) return { iconColor: 'text-blue-600', badge: 'TSX' }
+
+    // Python
+    if (/\.py$/.test(lower)) return { iconColor: 'text-blue-500', badge: 'PY' }
+
+    // Java
+    if (/\.java$/.test(lower)) return { iconColor: 'text-red-500', badge: 'JAVA' }
+
+    // Notebooks
+    if (/\.ipynb$/.test(lower)) return { iconColor: 'text-orange-500', badge: 'NB' }
+
+    // Images
     if (/\.(png|jpg|jpeg|gif|webp|bmp|svg|ico)$/.test(lower)) {
-      return { accent: 'bg-cyan-500/15 text-cyan-300', badge: 'IMG' }
-    }
-    if (/\.(mp3|wav|ogg|m4a|flac)$/.test(lower)) {
-      return { accent: 'bg-fuchsia-500/15 text-fuchsia-300', badge: 'AUDIO' }
-    }
-    if (/\.(mp4|mov|avi|mkv|webm)$/.test(lower)) {
-      return { accent: 'bg-rose-500/15 text-rose-300', badge: 'VIDEO' }
-    }
-    if (/\.(zip|rar|7z|tar|gz)$/.test(lower)) {
-      return { accent: 'bg-orange-500/15 text-orange-300', badge: 'ZIP' }
-    }
-    if (/\.(csv|xls|xlsx)$/.test(lower)) {
-      return { accent: 'bg-emerald-500/15 text-emerald-300', badge: 'DATA' }
-    }
-    if (/\.(json|jsonc)$/.test(lower)) {
-      return { accent: 'bg-sky-500/15 text-sky-300', badge: 'JSON' }
-    }
-    if (/\.(md|txt|sql|log)$/.test(lower)) {
-      return {
-        accent: 'bg-slate-500/15 text-slate-300',
-        badge: lower.endsWith('.md') ? 'MD' : 'TXT'
-      }
-    }
-    if (
-      /\.(js|jsx|ts|tsx|mjs|cjs|css|scss|sass|html|htm|py|java|c|cpp|cs|go|rs|php|rb|yaml|yml)$/.test(
-        lower
-      )
-    ) {
-      return {
-        accent: 'bg-violet-500/15 text-violet-300',
-        badge: lower.split('.').pop().toUpperCase()
-      }
-    }
-    if (/\.(bat|cmd|ps1|sh)$/.test(lower)) {
-      return { accent: 'bg-lime-500/15 text-lime-300', badge: 'CMD' }
-    }
-    if (/\.(d\.ts)$/.test(lower)) {
-      return { accent: 'bg-blue-500/15 text-blue-300', badge: 'DTS' }
+      return { iconColor: 'text-cyan-500', badge: 'IMG' }
     }
 
-    return { accent: 'bg-gray-500/15 text-gray-300', badge: 'BIN' }
+    // Audio
+    if (/\.(mp3|wav|ogg|m4a|flac)$/.test(lower)) {
+      return { iconColor: 'text-fuchsia-500', badge: 'AUDIO' }
+    }
+
+    // Video
+    if (/\.(mp4|mov|avi|mkv|webm)$/.test(lower)) {
+      return { iconColor: 'text-rose-500', badge: 'VIDEO' }
+    }
+
+    // Archives
+    if (/\.(zip|rar|7z|tar|gz)$/.test(lower)) {
+      return { iconColor: 'text-orange-600', badge: 'ZIP' }
+    }
+
+    // Data
+    if (/\.(csv|xls|xlsx)$/.test(lower)) {
+      return { iconColor: 'text-emerald-500', badge: 'DATA' }
+    }
+
+    // JSON
+    if (/\.(json|jsonc)$/.test(lower)) {
+      return { iconColor: 'text-sky-500', badge: 'JSON' }
+    }
+
+    // Text/Markdown
+    if (/\.(md|txt|sql|log)$/.test(lower)) {
+      return { iconColor: 'text-slate-400', badge: lower.endsWith('.md') ? 'MD' : 'TXT' }
+    }
+
+    // Scripts
+    if (/\.(sh|bash|bat|cmd|ps1)$/.test(lower)) {
+      return { iconColor: 'text-lime-500', badge: 'CMD' }
+    }
+
+    // C/C++/C#
+    if (/\.(c|cpp|cc|cxx|h|hpp)$/.test(lower)) {
+      return { iconColor: 'text-blue-400', badge: lower.includes('h') ? 'H' : 'C++' }
+    }
+    if (/\.cs$/.test(lower)) {
+      return { iconColor: 'text-purple-600', badge: 'C#' }
+    }
+
+    // Other languages
+    if (/\.go$/.test(lower)) return { iconColor: 'text-cyan-600', badge: 'GO' }
+    if (/\.rs$/.test(lower)) return { iconColor: 'text-orange-700', badge: 'RS' }
+    if (/\.php$/.test(lower)) return { iconColor: 'text-purple-400', badge: 'PHP' }
+    if (/\.rb$/.test(lower)) return { iconColor: 'text-red-600', badge: 'RB' }
+    if (/\.(yaml|yml)$/.test(lower)) return { iconColor: 'text-red-500', badge: 'YAML' }
+
+    // TypeScript definitions
+    if (/\.d\.ts$/.test(lower)) return { iconColor: 'text-blue-600', badge: 'DTS' }
+
+    // Default
+    return { iconColor: 'text-gray-400' }
   }
 
   const inferProviderFromConnection = (connection) => {
@@ -1515,13 +1569,17 @@ function App() {
       .trim()
       .replace(/\/+$/, '')
     if (!raw) return ''
-
     if (/^https?:\/\//i.test(raw)) {
       try {
         return new URL(raw).origin
       } catch {
         return raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
       }
+    }
+
+    // If user provided only a port like ":11434", assume localhost
+    if (/^:\d+$/.test(raw)) {
+      return `${fallbackProtocol}//localhost${raw}`
     }
 
     const stripped = raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
@@ -1635,79 +1693,6 @@ function App() {
     return `${trimmedBase}\\${trimmedName}`
   }
 
-  const createFileInWorkspace = async () => {
-    const targetBase = selectedFolder || rootFolder
-    if (!targetBase) {
-      pushActivity('warning', 'Open a workspace first to create files.')
-      return
-    }
-    if (!newNameInput.trim()) return
-    const fullPath = ensureJoinedPath(targetBase, newNameInput.trim())
-    setShowCreateFile(false)
-    setNewNameInput('')
-    try {
-      let initialContent = ''
-      if (
-        String(fullPath || '')
-          .toLowerCase()
-          .endsWith('.ipynb')
-      ) {
-        const notebook = {
-          cells: [
-            {
-              cell_type: 'markdown',
-              metadata: { language: 'markdown' },
-              source: ['# New Notebook\n', 'This notebook was created by Sam Code.']
-            }
-          ],
-          metadata: {},
-          nbformat: 4,
-          nbformat_minor: 5
-        }
-        initialContent = JSON.stringify(notebook, null, 2)
-      }
-
-      const ok = await window.api.saveFile(fullPath, initialContent)
-      if (ok) {
-        pushActivity('success', `Created ${fullPath}`)
-        await loadDirectory(targetBase)
-        await openFile(fullPath)
-      } else {
-        pushActivity('error', `Failed to create ${fullPath}`)
-      }
-    } catch (error) {
-      console.error(error)
-      pushActivity('error', `Error creating file: ${error.message}`)
-    }
-  }
-
-  const createFolderInWorkspace = async () => {
-    const targetBase = selectedFolder || rootFolder
-    if (!targetBase) {
-      pushActivity('warning', 'Open a workspace first to create folders.')
-      return
-    }
-    if (!newNameInput.trim()) return
-    const fullPath = ensureJoinedPath(targetBase, newNameInput.trim())
-    setShowCreateFolder(false)
-    setNewNameInput('')
-    try {
-      const ok =
-        typeof window.api.mkdir === 'function'
-          ? await window.api.mkdir(fullPath)
-          : await window.electron.ipcRenderer.invoke('fs:makeDir', fullPath)
-      if (ok) {
-        pushActivity('success', `Created folder ${fullPath}`)
-        await loadDirectory(targetBase)
-      } else {
-        pushActivity('error', `Failed to create folder ${fullPath}`)
-      }
-    } catch (error) {
-      console.error(error)
-      pushActivity('error', `Error creating folder: ${error.message}`)
-    }
-  }
-
   const basenameFromPath = (p) =>
     String(p || '')
       .replace(/[\\/]+$/, '')
@@ -1807,7 +1792,17 @@ function App() {
   const confirmRename = async () => {
     try {
       const parent = dirnameFromPath(renameTarget) || rootFolder
-      const newPath = ensureJoinedPath(parent, renameNewName)
+      let finalName = renameNewName.trim()
+
+      // Add .txt default extension for files without extension
+      const isDir =
+        tree[renameTarget]?.[0]?.isDirectory ||
+        (renameTarget.includes('\\') && !renameTarget.includes('.'))
+      if (!isDir && finalName && !finalName.includes('.')) {
+        finalName = `${finalName}.txt`
+      }
+
+      const newPath = ensureJoinedPath(parent, finalName)
       const ok =
         typeof window.api?.renamePath === 'function'
           ? await window.api.renamePath(renameTarget, newPath)
@@ -1839,6 +1834,114 @@ function App() {
     }
   }
 
+  const createFileAndStartRename = async () => {
+    const targetBase = selectedFolder || rootFolder
+    if (!targetBase) {
+      pushActivity('warning', 'Open a workspace first to create files.')
+      return
+    }
+
+    try {
+      // Create unique filename
+      let counter = 1
+      let filename = 'new_file.txt'
+      let fullPath = ensureJoinedPath(targetBase, filename)
+
+      // Check if file exists and create with incrementing number if needed
+      let fileItems = tree[targetBase] || []
+      while (fileItems.some((item) => item.name === filename)) {
+        filename = `new_file_${counter}.txt`
+        counter++
+      }
+
+      fullPath = ensureJoinedPath(targetBase, filename)
+
+      // Create the empty file
+      const ok = await window.api.saveFile(fullPath, '')
+      if (ok) {
+        await loadDirectory(targetBase)
+        // Start rename immediately
+        setRenameTarget(fullPath)
+        setRenameNewName('new_file')
+      } else {
+        pushActivity('error', `Failed to create file`)
+      }
+    } catch (error) {
+      console.error(error)
+      pushActivity('error', `Error creating file: ${error.message}`)
+    }
+  }
+
+  const createFolderAndStartRename = async () => {
+    const targetBase = selectedFolder || rootFolder
+    if (!targetBase) {
+      pushActivity('warning', 'Open a workspace first to create folders.')
+      return
+    }
+
+    try {
+      // Create unique folder name
+      let counter = 1
+      let foldername = 'new_folder'
+      let fullPath = ensureJoinedPath(targetBase, foldername)
+
+      // Check if folder exists and create with incrementing number if needed
+      let fileItems = tree[targetBase] || []
+      while (fileItems.some((item) => item.name === foldername)) {
+        foldername = `new_folder_${counter}`
+        counter++
+      }
+
+      fullPath = ensureJoinedPath(targetBase, foldername)
+
+      // Create the folder
+      const ok =
+        typeof window.api.mkdir === 'function'
+          ? await window.api.mkdir(fullPath)
+          : await window.electron.ipcRenderer.invoke('fs:makeDir', fullPath)
+
+      if (ok) {
+        await loadDirectory(targetBase)
+        // Start rename immediately
+        setRenameTarget(fullPath)
+        setRenameNewName('new_folder')
+      } else {
+        pushActivity('error', `Failed to create folder`)
+      }
+    } catch (error) {
+      console.error(error)
+      pushActivity('error', `Error creating folder: ${error.message}`)
+    }
+  }
+
+  const refreshExplorer = async () => {
+    if (!rootFolder) {
+      pushActivity('warning', 'No workspace open to refresh.')
+      return
+    }
+    try {
+      // Clear cached tree and reload root + any expanded directories
+      setTree({})
+      // Ensure root is expanded
+      setExpanded((current) => ({ ...current, [rootFolder]: true }))
+
+      // Build list of directories to load (root first, then expanded ones)
+      const expandedDirs = Object.keys(expanded).filter((p) => expanded[p])
+      const toLoad = [rootFolder, ...expandedDirs.filter((p) => p !== rootFolder)]
+
+      for (const p of toLoad) {
+        // load sequentially to avoid IO contention and preserve order
+        // eslint-disable-next-line no-await-in-loop
+        await loadDirectory(p)
+      }
+
+      pushActivity('success', 'Explorer refreshed.')
+    } catch (error) {
+      console.error(error)
+      pushActivity('error', `Failed to refresh explorer: ${error.message}`)
+    }
+  }
+
   const handleClone = async (path) => {
     try {
       const name = basenameFromPath(path)
@@ -1860,6 +1963,93 @@ function App() {
       pushActivity('error', `Clone error: ${e.message}`)
     } finally {
       setMenuForPath('')
+    }
+  }
+
+  const handleItemClick = (itemPath, isDir, event) => {
+    const isCtrlClick = event.ctrlKey || event.metaKey
+
+    if (isCtrlClick) {
+      // Toggle selection with Ctrl/Cmd
+      setSelectedPaths((prev) => {
+        const newSet = new Set(prev)
+        if (newSet.has(itemPath)) {
+          newSet.delete(itemPath)
+        } else {
+          newSet.add(itemPath)
+        }
+        return newSet
+      })
+      setSelectedExplorerPath(itemPath)
+    } else {
+      // Single selection without Ctrl
+      setSelectedPaths(new Set([itemPath]))
+      setSelectedExplorerPath(itemPath)
+
+      // Additional behavior for folders and files
+      if (isDir) {
+        setSelectedFolder(itemPath)
+        toggleDirectory(itemPath)
+      } else {
+        setSelectedFolder(dirnameFromPath(itemPath))
+        openFile(itemPath)
+      }
+    }
+  }
+
+  const handleDragStart = (item, event) => {
+    const itemsToMove = selectedPaths.has(item.path) ? Array.from(selectedPaths) : [item.path]
+
+    setDraggedItems(itemsToMove)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', itemsToMove.join('|'))
+  }
+
+  const handleDragOver = (event) => {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+  }
+
+  const handleDropOnFolder = async (targetFolderPath, event) => {
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (!draggedItems || draggedItems.length === 0) return
+
+    try {
+      for (const sourcePath of draggedItems) {
+        if (sourcePath === targetFolderPath) continue // Can't drop on itself
+
+        const itemName = basenameFromPath(sourcePath)
+        const destPath = ensureJoinedPath(targetFolderPath, itemName)
+
+        const ok =
+          typeof window.api?.renamePath === 'function'
+            ? await window.api.renamePath(sourcePath, destPath)
+            : await window.electron.ipcRenderer.invoke('fs:rename', sourcePath, destPath)
+
+        if (!ok) {
+          pushActivity('error', `Failed to move ${itemName}`)
+          continue
+        }
+      }
+
+      pushActivity('success', `Moved ${draggedItems.length} item(s)`)
+      await loadDirectory(targetFolderPath)
+
+      // Reload source directories
+      for (const sourcePath of draggedItems) {
+        const sourceParent = dirnameFromPath(sourcePath) || rootFolder
+        if (sourceParent !== targetFolderPath) {
+          await loadDirectory(sourceParent)
+        }
+      }
+
+      setDraggedItems(null)
+      setSelectedPaths(new Set())
+    } catch (e) {
+      console.error(e)
+      pushActivity('error', `Move error: ${e.message}`)
     }
   }
 
@@ -1885,6 +2075,8 @@ function App() {
     if (!hasApi()) return
     setFileLoading(true)
     setActivePath(filePath)
+    setSelectedPaths(new Set([filePath]))
+    setSelectedExplorerPath(filePath)
     setCode('// Loading file...')
     setStatus(`Loading ${filePath}...`)
     setTabs((current) => {
@@ -1905,6 +2097,8 @@ function App() {
       }
 
       setActivePath(result.path)
+      setSelectedPaths(new Set([result.path]))
+      setSelectedExplorerPath(result.path)
       setCode(result.content ?? '')
       setStatus(result.truncated ? `Loaded preview of ${result.name}.` : `Editing ${result.name}`)
       pushActivity(
@@ -2768,8 +2962,36 @@ Rules:
             `Rate limited (429). Waiting ${Math.ceil(cooldownMs / 1000)}s before retry.`
           )
         } else {
-          setStatus('Request failed. Check your API key and network connection.')
-          pushActivity('error', `Request failed: ${error.message}`)
+          // Provide more actionable feedback for connection errors
+          const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
+          let attempted = ''
+          try {
+            if (effectiveProvider === 'ollama') {
+              attempted = normalizeEndpointOrigin(apiKey, 'http:')
+            } else if (effectiveProvider === 'google') {
+              attempted = String(apiKey || '').trim()
+            } else {
+              attempted =
+                effectiveProvider === 'openai' ? 'https://api.openai.com' : 'https://openrouter.ai'
+            }
+          } catch {
+            attempted = ''
+          }
+
+          const brief = String(error?.message || error)
+          if (
+            brief.includes('Failed to fetch') ||
+            brief.includes('NetworkError') ||
+            brief.includes('ECONNREFUSED')
+          ) {
+            setStatus(
+              `Connection refused when contacting ${attempted || 'the API'}. Is the provider running?`
+            )
+            pushActivity('error', `Connection refused: ${attempted || 'API endpoint'}`)
+          } else {
+            setStatus('Request failed. Check your API key and network connection.')
+            pushActivity('error', `Request failed: ${brief}`)
+          }
         }
       }
     } finally {
@@ -2785,27 +3007,14 @@ Rules:
       const isOpen = Boolean(expanded[item.path])
       const paddingLeft = `${depth * 14 + 12}px`
       const Icon = iconForPath(item, isOpen)
-      const tone = explorerToneForPath(item, isOpen)
-      const rowActive = selectedExplorerPath === item.path || activePath === item.path
-      const extensionLabel =
-        !isDir && item.name.includes('.')
-          ? item.name.split('.').pop().slice(0, 4).toUpperCase()
-          : ''
+      const tone = explorerToneForPath(item)
+      const isSelected = selectedPaths.has(item.path) || selectedExplorerPath === item.path
+      const isDragging = draggedItems?.includes(item.path)
 
       return (
         <div key={item.path} className="group relative">
           <div
-            onClick={() => {
-              if (isDir) {
-                setSelectedFolder(item.path)
-                setSelectedExplorerPath(item.path)
-                toggleDirectory(item.path)
-              } else {
-                setSelectedFolder(dirnameFromPath(item.path))
-                setSelectedExplorerPath(item.path)
-                openFile(item.path)
-              }
-            }}
+            onClick={(e) => handleItemClick(item.path, isDir, e)}
             onContextMenu={(event) => {
               event.preventDefault()
               event.stopPropagation()
@@ -2823,17 +3032,46 @@ Rules:
                 y: event.clientY
               })
             }}
+            draggable
+            onDragStart={(e) => handleDragStart(item, e)}
+            onDragOver={isDir ? handleDragOver : undefined}
+            onDrop={isDir ? (e) => handleDropOnFolder(item.path, e) : undefined}
             role="button"
             aria-expanded={isDir ? isOpen : undefined}
-            className={`mx-2 flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-all duration-150 ${rowActive ? 'border-blue-500/30 bg-[#1f2937] text-white shadow-[0_0_0_1px_rgba(59,130,246,0.12)]' : 'border-transparent text-gray-200 hover:border-white/5 hover:bg-white/5'}`}
+            className={`mx-2 flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition-all duration-150 ${isDragging ? 'opacity-50 bg-blue-500/10' : ''} ${isSelected ? 'border-white/10 bg-[#1f2937]' : 'border-transparent hover:border-white/5 hover:bg-white/5'}`}
             style={{ paddingLeft }}
           >
-            <span
-              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${tone.accent}`}
-            >
-              <Icon size={14} className="text-current" />
-            </span>
-            <div className="flex min-w-0 flex-1 items-center gap-2">
+            {isDir ? (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    toggleDirectory(item.path)
+                  }}
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-gray-400 px-0 py-0 mr-1 transform transition-transform duration-150 ${isOpen ? 'rotate-90' : ''}`}
+                  aria-label={isOpen ? 'Collapse folder' : 'Expand folder'}
+                >
+                  <ChevronRight size={14} />
+                </button>
+                <span
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center ${tone.iconColor}`}
+                >
+                  <Icon size={16} className="text-current" />
+                </span>
+              </>
+            ) : (
+              <span
+                className={`flex h-5 w-8 shrink-0 items-center justify-center ${tone.iconColor}`}
+              >
+                {tone.badge ? (
+                  <span className="text-[9px] font-bold uppercase tracking-wider">
+                    {tone.badge}
+                  </span>
+                ) : null}
+              </span>
+            )}
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
               {renameTarget === item.path ? (
                 <input
                   autoFocus
@@ -2851,14 +3089,13 @@ Rules:
                     }
                   }}
                   onFocus={(event) => event.target.select()}
-                  className="min-w-0 flex-1 rounded border border-blue-500/50 bg-[#111827] px-2 py-1 text-sm font-medium text-white outline-none"
+                  className="min-w-0 flex-1 rounded border border-blue-500/50 bg-[#111827] px-2 py-1 text-xs font-medium text-white outline-none"
                 />
               ) : (
-                <span className="truncate font-medium">{item.name}</span>
-              )}
-              {!isDir && extensionLabel && (
-                <span className="rounded-full border border-white/10 bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-gray-300">
-                  {extensionLabel}
+                <span
+                  className={`truncate ${isSelected ? 'font-medium text-gray-100' : 'text-gray-300'}`}
+                >
+                  {item.name}
                 </span>
               )}
             </div>
@@ -3245,10 +3482,7 @@ Rules:
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setShowCreateFile(true)
-                        setNewNameInput('')
-                      }}
+                      onClick={createFileAndStartRename}
                       title="Create file"
                       className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-[#3c3c3c]"
                     >
@@ -3256,14 +3490,19 @@ Rules:
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setShowCreateFolder(true)
-                        setNewNameInput('')
-                      }}
+                      onClick={createFolderAndStartRename}
                       title="Create folder"
                       className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-[#3c3c3c]"
                     >
                       <FolderOpen size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={refreshExplorer}
+                      title="Refresh explorer"
+                      className="rounded px-2 py-1 text-xs text-gray-300 hover:bg-[#3c3c3c]"
+                    >
+                      <RefreshCw size={14} />
                     </button>
                   </div>
                 </div>
@@ -3632,14 +3871,24 @@ Rules:
 
                                         updateNotebookCellHeight()
                                         editor.onDidContentSizeChange(updateNotebookCellHeight)
-                                        if (cell.cell_type === 'code') {
-                                          editor.addCommand(
-                                            monaco.KeyMod.Shift | monaco.KeyCode.Enter,
-                                            () => {
-                                              runNotebookCell(idx)
-                                            }
-                                          )
-                                        }
+                                        // Always bind Shift+Enter to run the current cell
+                                        editor.addCommand(
+                                          monaco.KeyMod.Shift | monaco.KeyCode.Enter,
+                                          () => {
+                                            suppressNextNotebookScroll.current = true
+                                            // Fire-and-forget: run cell then advance selection
+                                            Promise.resolve(runNotebookCell(idx)).then((ok) => {
+                                              if (ok) {
+                                                const cells = getNotebookCells()
+                                                if (Array.isArray(cells)) {
+                                                  const next =
+                                                    idx + 1 < cells.length ? idx + 1 : idx
+                                                  setActiveNotebookCellIndex(next)
+                                                }
+                                              }
+                                            })
+                                          }
+                                        )
                                         if (activeNotebookCellIndex === idx) {
                                           editor.focus()
                                         }
@@ -4411,69 +4660,6 @@ Rules:
                   </div>
                 </div>
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Create file / folder modals */}
-      {showCreateFile && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-105 rounded bg-[#1e1e1e] p-4 shadow-lg">
-            <div className="mb-2 text-sm font-semibold">Create File</div>
-            <input
-              autoFocus
-              value={newNameInput}
-              onChange={(e) => setNewNameInput(e.target.value)}
-              placeholder="relative/path/to/newFile.js"
-              className="w-full rounded border border-gray-700 bg-[#252526] px-3 py-2 text-sm text-white outline-none"
-            />
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCreateFile(false)}
-                className="rounded px-3 py-1 text-sm text-gray-300 hover:bg-[#3c3c3c]"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={createFileInWorkspace}
-                className="rounded bg-blue-600 px-3 py-1 text-sm font-semibold text-white hover:bg-blue-500"
-              >
-                Create
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showCreateFolder && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-105 rounded bg-[#1e1e1e] p-4 shadow-lg">
-            <div className="mb-2 text-sm font-semibold">Create Folder</div>
-            <input
-              autoFocus
-              value={newNameInput}
-              onChange={(e) => setNewNameInput(e.target.value)}
-              placeholder="relative/path/to/newFolder"
-              className="w-full rounded border border-gray-700 bg-[#252526] px-3 py-2 text-sm text-white outline-none"
-            />
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCreateFolder(false)}
-                className="rounded px-3 py-1 text-sm text-gray-300 hover:bg-[#3c3c3c]"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={createFolderInWorkspace}
-                className="rounded bg-blue-600 px-3 py-1 text-sm font-semibold text-white hover:bg-blue-500"
-              >
-                Create
-              </button>
             </div>
           </div>
         </div>
