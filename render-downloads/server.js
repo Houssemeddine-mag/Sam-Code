@@ -2,13 +2,21 @@ import express from 'express'
 import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
 const port = Number(process.env.PORT || 10000)
 const uploadToken = process.env.UPLOAD_TOKEN || ''
 const downloadDir = process.env.DOWNLOAD_DIR || '/data/downloads'
 
 fs.mkdirSync(downloadDir, { recursive: true })
+
+// Serve static files from landing directory
+const landingPath = path.join(__dirname, './landing')
+if (fs.existsSync(landingPath)) {
+  app.use(express.static(landingPath))
+}
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, downloadDir),
