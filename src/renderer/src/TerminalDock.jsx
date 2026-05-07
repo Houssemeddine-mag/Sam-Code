@@ -46,7 +46,15 @@ function extractTerminalUrls(text) {
   return urls
 }
 
-function TerminalSession({ session, cwd, active, pushActivity }) {
+function TerminalSession({
+  session,
+  cwd,
+  active,
+  focusSignal,
+  pushActivity,
+  onExit,
+  onCommandFinished
+}) {
   const containerRef = useRef(null)
   const terminalRef = useRef(null)
   const fitAddonRef = useRef(null)
@@ -58,6 +66,9 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
   const linkProviderDisposeRef = useRef(null)
   const initializedRef = useRef(false)
   const previousCwdRef = useRef(cwd)
+  const pendingCommandTokenRef = useRef('')
+  const pendingCommandShellRef = useRef(session.shell)
+  const pendingCommandOutputRef = useRef('')
   const [status, setStatus] = useState('Starting terminal...')
   const resolvedCwd = String(session.cwd || cwd || '').trim()
 
@@ -239,7 +250,32 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
 
       dataDisposeRef.current = window.api.onTerminalData((payload) => {
         if (payload.sessionId === sessionIdRef.current && terminalRef.current) {
-          terminalRef.current.write(payload.data)
+          const chunk = String(payload.data || '')
+          terminalRef.current.write(chunk)
+
+          if (pendingCommandTokenRef.current) {
+            pendingCommandOutputRef.current += chunk
+            const buffered = pendingCommandOutputRef.current
+            const token = String(pendingCommandTokenRef.current || '')
+
+            if (buffered.includes(token)) {
+              const exitCodeMatch = buffered.match(new RegExp(`${token}:(-?\\d+)`))
+              const exitCode = exitCodeMatch ? Number(exitCodeMatch[1]) : 0
+              const outputBeforeMarker = buffered.slice(0, buffered.indexOf(token)).trim()
+              pendingCommandTokenRef.current = ''
+              pendingCommandOutputRef.current = ''
+              pendingCommandShellRef.current = session.shell
+              setStatus(`Command finished with code ${exitCode}.`)
+              pushActivity?.('success', `Command finished with code ${exitCode}.`)
+              try {
+                onCommandFinished?.({
+                  sessionId: sessionIdRef.current,
+                  exitCode,
+                  output: outputBeforeMarker
+                })
+              } catch (e) {}
+            }
+          }
         }
       })
 
@@ -247,6 +283,9 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
         if (payload.sessionId === sessionIdRef.current) {
           setStatus(`Terminal exited with code ${payload.exitCode}.`)
           pushActivity?.('warning', `${session.title} exited with code ${payload.exitCode}.`)
+          try {
+            onExit?.(payload)
+          } catch (e) {}
         }
       })
 
@@ -298,6 +337,13 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
   }, [resolvedCwd, pushActivity, session.shell, session.title])
 
   useEffect(() => {
+    if (active && terminalRef.current) {
+      terminalRef.current.focus()
+      fitTerminal()
+    }
+  }, [active, focusSignal])
+
+  useEffect(() => {
     if (active && fitAddonRef.current && terminalRef.current) {
       fitTimerRef.current = window.setTimeout(() => {
         fitTerminal()
@@ -326,13 +372,24 @@ function TerminalSession({ session, cwd, active, pushActivity }) {
   )
 }
 
-function TerminalDock({ open, cwd, onClose, pushActivity, command, onCommandExecuted }) {
+function TerminalDock({
+  open,
+  cwd,
+  onClose,
+  pushActivity,
+  command,
+  onCommandExecuted,
+  onCommandFinished
+}) {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
   const [defaultShell, setDefaultShell] = useState('powershell')
   const nextIndexRef = useRef(1)
   const resolvedCwd = String(cwd || '').trim()
   const pendingCommandRef = useRef('')
+  const pendingCommandSessionRef = useRef('')
+  const pendingCommandTokenRef = useRef('')
+  const [focusSignal, setFocusSignal] = useState(0)
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || sessions[0],
@@ -411,11 +468,38 @@ function TerminalDock({ open, cwd, onClose, pushActivity, command, onCommandExec
       const cmd = pendingCommandRef.current.trim()
       pendingCommandRef.current = ''
 
+      const activeSession = sessions.find((session) => session.id === activeSessionId)
+      const shell = String(activeSession?.shell || defaultShell).toLowerCase()
+      const token = `__SAMCODE_DONE__${Date.now()}_${Math.random().toString(16).slice(2)}`
+      pendingCommandTokenRef.current = token
+
       // Write the command to the active terminal session
-      window.api.writeTerminal(activeSessionId, cmd + '\r\n')
+      const wrappedCommand =
+        shell === 'cmd'
+          ? `${cmd} & echo ${token}:%errorlevel%`
+          : `${cmd}; Write-Output "${token}:$LASTEXITCODE"`
+
+      window.api.writeTerminal(activeSessionId, wrappedCommand + '\r\n')
+      // mark which session ran the pending command
+      pendingCommandSessionRef.current = activeSessionId
+      setFocusSignal((current) => current + 1)
       onCommandExecuted?.()
     }
-  }, [activeSessionId, sessions, onCommandExecuted])
+  }, [activeSessionId, sessions, onCommandExecuted, defaultShell])
+
+  const handleSessionExit = (payload) => {
+    try {
+      const sid = String(payload?.sessionId || '')
+      const exitCode = Number(payload?.exitCode)
+      if (pendingCommandSessionRef.current && pendingCommandSessionRef.current === sid) {
+        pendingCommandSessionRef.current = ''
+        pendingCommandTokenRef.current = ''
+        try {
+          onCommandFinished?.({ sessionId: sid, exitCode })
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
 
   const closeSession = (sessionId) => {
     setSessions((current) => {
@@ -541,7 +625,10 @@ function TerminalDock({ open, cwd, onClose, pushActivity, command, onCommandExec
               session={session}
               cwd={cwd}
               active={session.id === activeSession?.id}
+              focusSignal={focusSignal}
               pushActivity={pushActivity}
+              onExit={handleSessionExit}
+              onCommandFinished={onCommandFinished}
             />
           ))
         )}

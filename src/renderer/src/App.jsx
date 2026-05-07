@@ -63,15 +63,6 @@ function App() {
       return DEFAULT_PREFERRED_MODELS
     }
   })
-  const [installedPackages, setInstalledPackages] = useState(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.installedPackages)
-      const parsed = raw ? JSON.parse(raw) : []
-      return Array.isArray(parsed) ? Array.from(new Set(parsed.filter(Boolean))) : []
-    } catch {
-      return []
-    }
-  })
 
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [rootFolder, setRootFolder] = useState('')
@@ -119,6 +110,18 @@ function App() {
   const [pendingAgentProposal, setPendingAgentProposal] = useState(null)
   const [pendingAgentStepIndex, setPendingAgentStepIndex] = useState(0)
   const [approvalBusy, setApprovalBusy] = useState(false)
+  const [agentEnvironment, setAgentEnvironment] = useState(null)
+  const [agentErrorHistory, setAgentErrorHistory] = useState([])
+  const [agentAutoRetry, setAgentAutoRetry] = useState(false)
+  const [installedPackages, setInstalledPackages] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.installedPackages)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  })
   useEffect(() => {
     // Register/unregister Java helpers only when the 'java-language' extension is installed
     const isInstalled = Array.isArray(installedPackages)
@@ -301,7 +304,7 @@ function App() {
   const [draggedItems, setDraggedItems] = useState(null)
   const [, setMenuForPath] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [deleteTarget, setDeleteTarget] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState([])
   const [deleteConfirmChoice, setDeleteConfirmChoice] = useState('delete')
   const [, setShowRenameModal] = useState(false)
   const [renameTarget, setRenameTarget] = useState('')
@@ -322,6 +325,22 @@ function App() {
   const [pythonEnvironments, setPythonEnvironments] = useState([])
   const [pythonEnvironmentsLoading, setPythonEnvironmentsLoading] = useState(false)
   const [pythonEnvironmentsError, setPythonEnvironmentsError] = useState('')
+  const getAgentWorkspaceScope = useCallback(() => {
+    return selectedFolder || (activePath ? dirnameFromPath(activePath) : rootFolder)
+  }, [activePath, rootFolder, selectedFolder])
+
+  const pendingTerminalResolveRef = useRef(null)
+  const handleTerminalCommandFinished = useCallback((payload) => {
+    try {
+      const resolver = pendingTerminalResolveRef.current
+      if (resolver) {
+        pendingTerminalResolveRef.current = null
+        resolver(payload)
+      }
+    } catch (e) {
+      pendingTerminalResolveRef.current = null
+    }
+  }, [])
 
   const layoutMetricsRef = useRef({ sidebarWidth: 280, rightWidth: 360, terminalHeight: 320 })
   const notebookCellRefs = useRef([])
@@ -387,6 +406,109 @@ function App() {
     } catch (e) {
       return null
     }
+  }
+
+  const detectAgentEnvironment = async () => {
+    try {
+      // Agent works within the opened workspace folder
+      // No need for global environment detection - we use the workspace context
+      if (!rootFolder) {
+        const fallback = {
+          workspace: null,
+          shell: 'powershell',
+          packageManagers: ['npm']
+        }
+        setAgentEnvironment(fallback)
+        return fallback
+      }
+
+      // Environment is scoped to the opened workspace
+      const environment = {
+        workspace: rootFolder,
+        shell: 'powershell',
+        packageManagers: ['npm']
+      }
+
+      setAgentEnvironment(environment)
+      return environment
+    } catch (error) {
+      console.error('Failed to setup agent environment:', error)
+      // Fallback - agent works with minimal context
+      const fallback = {
+        workspace: rootFolder || null,
+        shell: 'powershell',
+        packageManagers: ['npm']
+      }
+      setAgentEnvironment(fallback)
+      return fallback
+    }
+  }
+
+  const identifyRecoverableError = (stderr, stdout, exitCode) => {
+    if (!stderr && !stdout) return null
+
+    const output = `${stderr} ${stdout}`.toLowerCase()
+
+    // Common error patterns and recovery strategies
+    const patterns = [
+      {
+        pattern: /module not found|cannot find module|no such file or directory/i,
+        type: 'missing_module',
+        suggestion: 'Check the file path or install missing dependencies with npm install',
+        recoveryAction: 'install-dependencies'
+      },
+      {
+        pattern: /eaddrinuse|address already in use|port.*already in use/i,
+        type: 'port_conflict',
+        suggestion: 'Kill the process using the port or use a different port',
+        recoveryAction: 'kill-port-process'
+      },
+      {
+        pattern: /permission denied|access is denied|eperm/i,
+        type: 'permission_error',
+        suggestion: 'Try with elevated privileges or check file permissions',
+        recoveryAction: 'retry-with-elevation'
+      },
+      {
+        pattern:
+          /command not found|not recognized|is not (an internal or external command|a valid)/i,
+        type: 'command_not_found',
+        suggestion: 'Install the required tool or use an alternative command',
+        recoveryAction: 'install-tool'
+      },
+      {
+        pattern: /syntaxerror|unexpected token|invalid syntax/i,
+        type: 'syntax_error',
+        suggestion: 'Fix the syntax error in the code',
+        recoveryAction: 'fix-syntax'
+      },
+      {
+        pattern: /npm err|npm warning/i,
+        type: 'npm_error',
+        suggestion: 'Clear npm cache and try again',
+        recoveryAction: 'npm-cleanup'
+      },
+      {
+        pattern: /connection refused|econnrefused/i,
+        type: 'connection_error',
+        suggestion: 'Ensure the service is running and accessible',
+        recoveryAction: 'check-service'
+      },
+      {
+        pattern: /timeout|timed out/i,
+        type: 'timeout_error',
+        suggestion: 'Increase timeout or check network connectivity',
+        recoveryAction: 'retry-with-timeout'
+      }
+    ]
+
+    for (const { pattern, type, suggestion, recoveryAction } of patterns) {
+      if (pattern.test(output)) {
+        return { type, suggestion, recoveryAction, exitCode }
+      }
+    }
+
+    return null
   }
 
   const safeParseNotebook = (jsonStr) => {
@@ -527,6 +649,13 @@ function App() {
   useEffect(() => {
     codeRef.current = code
   }, [code])
+
+  // Initialize agent environment on mode change to 'agent'
+  useEffect(() => {
+    if (mode === 'agent' && !agentEnvironment) {
+      detectAgentEnvironment()
+    }
+  }, [mode, agentEnvironment])
 
   const formatNotebookOutput = (output) => {
     // Handle stream outputs (stdout/stderr)
@@ -818,7 +947,6 @@ function App() {
 
     for (const index of runnableIndices) {
       // run sequentially to preserve order
-      // eslint-disable-next-line no-await-in-loop
       await runNotebookCell(index)
     }
 
@@ -1437,13 +1565,14 @@ function App() {
         }
         if (showDeleteConfirm) {
           setShowDeleteConfirm(false)
-          setDeleteTarget('')
+          setDeleteTarget([])
         }
         return
       }
 
       if (!isTypingTarget && (e.key === 'Delete' || e.key === 'Suppr')) {
-        const targetPath = selectedExplorerPath || activePath
+        const targetPath =
+          selectedPaths.size > 0 ? Array.from(selectedPaths)[0] : selectedExplorerPath || activePath
         if (targetPath) {
           e.preventDefault()
           handleDeleteRequest(targetPath)
@@ -1828,6 +1957,16 @@ function App() {
     return `${trimmedBase}\\${trimmedName}`
   }
 
+  const resolveAgentCommandCwd = (requestedCwd, baseCwd) => {
+    const cwd = String(requestedCwd || '').trim()
+    const base = String(baseCwd || '').trim()
+
+    if (!base) return cwd || ''
+    if (!cwd || cwd === '.') return base
+    if (/^[A-Za-z]:[\\/]/.test(cwd) || /^\\\\/.test(cwd)) return cwd
+    return ensureJoinedPath(base, cwd)
+  }
+
   const basenameFromPath = (p) =>
     String(p || '')
       .replace(/[\\/]+$/, '')
@@ -1841,7 +1980,9 @@ function App() {
   }
 
   const handleDeleteRequest = (path) => {
-    setDeleteTarget(path)
+    const selected = Array.from(selectedPaths)
+    const targets = selected.length && selected.includes(path) ? selected : [path]
+    setDeleteTarget(targets)
     setShowDeleteConfirm(true)
     setDeleteConfirmChoice('delete')
     setMenuForPath('')
@@ -1850,23 +1991,39 @@ function App() {
 
   const confirmDelete = async () => {
     try {
-      const ok =
-        typeof window.api?.deletePath === 'function'
-          ? await window.api.deletePath(deleteTarget)
-          : await window.electron.ipcRenderer.invoke('fs:delete', deleteTarget)
-      if (ok) {
-        pushActivity('success', `Deleted ${deleteTarget}`)
-        const parent = dirnameFromPath(deleteTarget) || rootFolder
-        await loadDirectory(parent)
-      } else {
-        pushActivity('error', `Failed to delete ${deleteTarget}`)
+      const targets = Array.isArray(deleteTarget) ? deleteTarget : [deleteTarget].filter(Boolean)
+      let deletedCount = 0
+
+      for (const target of targets) {
+        const ok =
+          typeof window.api?.deletePath === 'function'
+            ? await window.api.deletePath(target)
+            : await window.electron.ipcRenderer.invoke('fs:delete', target)
+
+        if (ok) {
+          deletedCount += 1
+        } else {
+          pushActivity('error', `Failed to delete ${target}`)
+        }
+      }
+
+      if (deletedCount > 0) {
+        pushActivity(
+          'success',
+          deletedCount === 1 ? `Deleted ${targets[0]}` : `Deleted ${deletedCount} selected items`
+        )
+
+        const parent = dirnameFromPath(targets[0]) || rootFolder
+        if (parent) {
+          await loadDirectory(parent)
+        }
       }
     } catch (e) {
       console.error(e)
       pushActivity('error', `Delete error: ${e.message}`)
     } finally {
       setShowDeleteConfirm(false)
-      setDeleteTarget('')
+      setDeleteTarget([])
       setDeleteConfirmChoice('delete')
     }
   }
@@ -1893,7 +2050,7 @@ function App() {
           confirmDelete()
         } else {
           setShowDeleteConfirm(false)
-          setDeleteTarget('')
+          setDeleteTarget([])
           setDeleteConfirmChoice('delete')
         }
       }
@@ -1901,7 +2058,7 @@ function App() {
       if (event.key === 'Escape') {
         event.preventDefault()
         setShowDeleteConfirm(false)
-        setDeleteTarget('')
+        setDeleteTarget([])
         setDeleteConfirmChoice('delete')
       }
     }
@@ -2066,7 +2223,6 @@ function App() {
 
       for (const p of toLoad) {
         // load sequentially to avoid IO contention and preserve order
-        // eslint-disable-next-line no-await-in-loop
         await loadDirectory(p)
       }
 
@@ -2790,6 +2946,47 @@ function App() {
       .filter((operation) => String(operation?.action || '').toLowerCase() !== 'execute')
   }
 
+  const generateRecoveryCommand = (error, originalCommand) => {
+    if (!error) return null
+
+    const { type, recoveryAction } = error
+    const commandLower = (originalCommand || '').toLowerCase()
+
+    switch (recoveryAction) {
+      case 'npm-cleanup':
+        return 'npm cache clean --force && npm install'
+      case 'install-dependencies':
+        return 'npm install'
+      case 'kill-port-process':
+        // Extract port number if available
+        const portMatch = originalCommand.match(/:\d+/)
+        if (portMatch) {
+          const port = portMatch[0].replace(':', '')
+          return process.platform === 'win32'
+            ? `$ProcessOnPort = Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess; if ($ProcessOnPort) { Stop-Process -Id $ProcessOnPort -Force }`
+            : `lsof -ti:${port} | xargs kill -9 2>/dev/null || true`
+        }
+        return null
+      case 'install-tool':
+        // Check what tool is missing
+        if (commandLower.includes('git')) return 'git --version'
+        if (commandLower.includes('python')) return 'python --version'
+        return null
+      case 'fix-syntax':
+        return null // Requires user intervention or agent re-analysis
+      case 'retry-with-elevation':
+        return process.platform === 'win32'
+          ? `powershell -Command "Start-Process cmd -ArgumentList '/c ${originalCommand}' -Verb RunAs"`
+          : `sudo ${originalCommand}`
+      case 'retry-with-timeout':
+        return originalCommand.replace(/node\s/, 'node --max-old-space-size=4096 ')
+      case 'check-service':
+        return 'echo "Service check needed"'
+      default:
+        return null
+    }
+  }
+
   const buildCommandResultMessage = (operation, result) => {
     const stdout = String(result?.stdout || '').trim()
     const stderr = String(result?.stderr || '').trim()
@@ -2859,8 +3056,9 @@ function App() {
   }
 
   const executeApprovedAgentOperations = async (payload) => {
-    if (!rootFolder) {
-      throw new Error('Open a folder first so the agent can apply file operations.')
+    const agentWorkspaceRoot = getAgentWorkspaceScope()
+    if (!agentWorkspaceRoot) {
+      throw new Error('Select a folder in the Explorer before the agent can apply file operations.')
     }
 
     const operations = Array.isArray(payload?.operations) ? payload.operations : []
@@ -2873,15 +3071,15 @@ function App() {
       }
 
       const result = await window.api.applyAgentOperations({
-        rootFolder,
+        rootFolder: agentWorkspaceRoot,
         operations: fileOperations
       })
 
       const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
       const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
 
-      if (rootFolder) {
-        await loadDirectory(rootFolder)
+      if (agentWorkspaceRoot) {
+        await loadDirectory(agentWorkspaceRoot)
       }
 
       if (activePath) {
@@ -2914,59 +3112,86 @@ function App() {
     }
 
     if (String(currentOperation?.action || '').toLowerCase() === 'execute') {
-      const command = String(currentOperation?.command || '').trim()
-      if (!command) {
-        throw new Error('Execute action requires a command.')
+      const waitForTerminalResult = () =>
+        new Promise((resolve) => {
+          const timeoutId = window.setTimeout(() => {
+            if (pendingTerminalResolveRef.current === resolver) {
+              pendingTerminalResolveRef.current = null
+              resolve({
+                exitCode: 124,
+                output: 'Timed out waiting for terminal completion marker.'
+              })
+            }
+          }, 180000)
+
+          const resolver = (result) => {
+            window.clearTimeout(timeoutId)
+            resolve(result)
+          }
+
+          pendingTerminalResolveRef.current = resolver
+        })
+
+      let executeIndex = pendingAgentStepIndex
+      const commandMessages = []
+
+      while (executeIndex >= 0 && executeIndex < operations.length) {
+        const operation = operations[executeIndex]
+        if (String(operation?.action || '').toLowerCase() !== 'execute') {
+          executeIndex = findNextExecuteIndex(operations, executeIndex + 1)
+          continue
+        }
+
+        const command = String(operation?.command || '').trim()
+        if (!command) {
+          throw new Error('Execute action requires a command.')
+        }
+
+        // Run the command in the integrated terminal, keep focus there, and wait for completion.
+        setTerminalCommand(command)
+        setTerminalOpen(true)
+        setStatus(`Running command ${executeIndex + 1}/${operations.length}...`)
+        pushActivity('info', `Agent executed command in terminal: ${command}`)
+
+        const terminalResult = await waitForTerminalResult()
+        const exitCode = Number(terminalResult?.exitCode || 0)
+        const stdout = String(terminalResult?.output || '').trim()
+        const commandResult = { code: exitCode, stdout, stderr: '' }
+        const completionMessage = buildCommandResultMessage(operation, commandResult)
+        commandMessages.push(completionMessage)
+
+        setMessages((current) => [
+          ...current,
+          { role: 'assistant', kind: 'command', content: completionMessage }
+        ])
+
+        if (exitCode !== 0) {
+          pushActivity('warning', `Terminal command finished with code ${exitCode}.`)
+        } else {
+          pushActivity('success', `Terminal command finished with code ${exitCode}.`)
+        }
+
+        executeIndex = findNextExecuteIndex(operations, executeIndex + 1)
       }
 
-      const commandResult = await window.api.runCommand({
-        command,
-        cwd: String(currentOperation?.cwd || rootFolder || '').trim() || rootFolder,
-        shell: 'powershell'
-      })
-
-      const commandMessage = buildCommandResultMessage(currentOperation, commandResult)
-      setMessages((current) => [
-        ...current,
-        { role: 'assistant', kind: 'command', content: commandMessage }
-      ])
-
-      if (Number(commandResult?.code) !== 0) {
-        setStatus(`Command failed with exit code ${commandResult?.code}.`)
-        pushActivity('warning', `Command failed: ${command}`)
-        return commandMessage
-      }
-
-      const nextExecuteIndex = findNextExecuteIndex(operations, pendingAgentStepIndex + 1)
-      if (nextExecuteIndex >= 0) {
-        setPendingAgentStepIndex(nextExecuteIndex)
-        setStatus('Review the next command and allow or skip it.')
-        pushActivity(
-          'info',
-          `Command completed. Next step is ${describeAgentOperation(operations[nextExecuteIndex])}.`
-        )
-        return commandMessage
-      }
-
-      const fileOperations = collectFileOperations(operations, pendingAgentStepIndex + 1)
+      const fileOperations = collectFileOperations(operations, pendingAgentStepIndex)
       if (fileOperations.length === 0) {
-        setStatus(payload.summary || 'Agent finished with no file changes.')
-        pushActivity('info', 'Agent finished with no file changes.')
-        return [payload.summary || 'Agent finished with no file changes.', commandMessage]
-          .filter(Boolean)
-          .join('\n\n')
+        const doneSummary = payload.summary || 'Agent finished with no file changes.'
+        setStatus(doneSummary)
+        pushActivity('info', 'Agent finished all planned terminal steps.')
+        return [doneSummary, ...commandMessages].filter(Boolean).join('\n\n')
       }
 
       const result = await window.api.applyAgentOperations({
-        rootFolder,
+        rootFolder: agentWorkspaceRoot,
         operations: fileOperations
       })
 
       const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
       const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
 
-      if (rootFolder) {
-        await loadDirectory(rootFolder)
+      if (agentWorkspaceRoot) {
+        await loadDirectory(agentWorkspaceRoot)
       }
 
       if (activePath) {
@@ -2995,7 +3220,9 @@ function App() {
         pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
       }
 
-      return [buildAgentResultMessage(payload, result), commandMessage].filter(Boolean).join('\n\n')
+      return [buildAgentResultMessage(payload, result), ...commandMessages]
+        .filter(Boolean)
+        .join('\n\n')
     }
 
     const fileOperations = collectFileOperations(operations, pendingAgentStepIndex)
@@ -3004,15 +3231,15 @@ function App() {
     }
 
     const result = await window.api.applyAgentOperations({
-      rootFolder,
+      rootFolder: agentWorkspaceRoot,
       operations: fileOperations
     })
 
     const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
     const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
 
-    if (rootFolder) {
-      await loadDirectory(rootFolder)
+    if (agentWorkspaceRoot) {
+      await loadDirectory(agentWorkspaceRoot)
     }
 
     if (activePath) {
@@ -3059,19 +3286,9 @@ function App() {
           content: resultMessage
         }
       ])
-      const operations = Array.isArray(pendingAgentProposal.operations)
-        ? pendingAgentProposal.operations
-        : []
-      const nextExecuteIndex = findNextExecuteIndex(operations, pendingAgentStepIndex + 1)
-
-      if (nextExecuteIndex >= 0) {
-        setPendingAgentStepIndex(nextExecuteIndex)
-        setStatus('Review the next command and allow or skip it.')
-      } else {
-        setPendingAgentProposal(null)
-        setPendingAgentStepIndex(0)
-        setStatus('Agent finished command steps; file changes were applied automatically.')
-      }
+      setPendingAgentProposal(null)
+      setPendingAgentStepIndex(0)
+      setStatus('Agent finished all approved steps.')
     } catch (error) {
       const message = String(error?.message || error)
       setStatus(`Agent approval failed: ${message}`)
@@ -3153,106 +3370,119 @@ function App() {
     try {
       let systemPrompt = 'You are Sam, a concise coding assistant.'
       if (mode === 'agent') {
+        const agentWorkspaceScope = getAgentWorkspaceScope()
         systemPrompt += `
-You are working inside this workspace folder path: ${rootFolder || 'NO_WORKSPACE_SELECTED'}.
-Active file path: ${activePath || 'NO_ACTIVE_FILE'}.
+    You are an AUTONOMOUS coding agent in Sam Code IDE. You work ONLY in the folder currently selected in the Explorer, or the active file's folder if nothing is selected.
 
-You can inspect the workspace by proposing terminal commands such as Get-ChildItem, git status, npm run build, npm test, or other read-only checks when needed.
-Any command or file-changing action must be proposed first and will be shown to the user for approval before it runs.
-When debugging, inspect the folder and relevant files first, then propose the smallest useful command or edit plan.
-Only propose the next immediate step, not the whole pipeline. Prefer one command at a time, then wait for its terminal output before proposing another command.
-After the command phase is done, you may propose file changes that can be applied automatically without user approval.
+WORKSPACE CONTEXT:
+    - Explorer-selected folder: ${selectedFolder || 'NO_FOLDER_SELECTED'}
+- Active file: ${activePath || 'NO_ACTIVE_FILE'}
+    - Workspace root: ${rootFolder || 'NO_WORKSPACE_SELECTED'}
+    - Agent scope folder: ${agentWorkspaceScope || 'NO_AGENT_SCOPE'}
+- Shell: PowerShell (Windows)
 
-CRITICAL ERROR RECOVERY: When a command fails (exit code != 0), analyze the error message and propose a corrected version immediately:
-- If "capital letters not allowed" (npm naming): propose lowercase alternative
-- If "file not found" or "no such file": propose checking paths first, or create missing files
-- If "permission denied": propose using different access methods or tools
-- If "not installed" or "command not found": propose installing it or using alternatives
-Do NOT ask the user to fix it. Analyze the error and propose the next command to solve it.
+    IMPORTANT: Do not run project scaffolding, installs, or file changes in the workspace root unless the selected folder is the workspace root. Use the agent scope folder as cwd and as the base for relative paths.
 
-When the user asks for changes, respond ONLY with JSON in a single \`\`\`json block using:
+YOUR AUTONOMOUS OPERATING LOOP - ALWAYS FOLLOW THIS PATTERN:
+
+[STEP 1] UNDERSTAND: Read the user's request carefully. Ask yourself: what is the end goal? What files need to change? What commands need to run?
+
+[STEP 2] PLAN: Before proposing operations, NARRATE your plan to the user with [STEP N/M] prefixes:
+- [STEP 1/N]: "First, I'll inspect the project structure..."
+- [STEP 2/N]: "Then, I'll install the required dependencies..."
+- [STEP 3/N]: "Finally, I'll create the component file..."
+Show the user your complete thinking and which commands will be executed in what order.
+
+[STEP 3] ACT: Propose ALL operations in ONE JSON block with clear narration:
+- Include [STEP N/M] prefixes in the summary explaining what each operation does
+- Combine setup commands, file operations, and build commands in optimal order
+- Use relative paths under the workspace folder
+- Keep every command cwd inside the agent scope folder
+
+[STEP 4] VALIDATE: When a command fails (non-zero exit code):
+- Analyze the stderr output immediately
+- Identify the error type: missing module, port conflict, permission denied, command not found, syntax error, etc.
+- DO NOT wait for user approval - autonomously propose and execute the fix
+- Retry the same or corrected command without asking
+
+[STEP 5] ITERATE: If the retry still fails, analyze the NEW error and propose the next fix. Continue until success.
+- Only pause for genuine blockers (user input required, network down, etc.)
+- Never repeat the exact same failing command twice
+
+ERROR RECOVERY PATTERNS YOU KNOW:
+- "ModuleNotFoundError" or "Cannot find module": Run npm install or pip install to get missing dependency
+- "Address already in use" (EADDRINUSE): Kill process on that port or use a different port
+- "Permission denied" (EPERM): Try with elevated privileges, change file permissions, or use alternative approach
+- "command not found": Check PATH, install the tool, or use alternative command
+- "SyntaxError" or "Unexpected token": Provide corrected code and re-apply
+- "npm ERR": Clear npm cache (npm cache clean --force) and retry
+- "Connection refused" (ECONNREFUSED): Verify service is running, check hostname/port
+- "Timeout": Increase timeout value, check network, or retry operation
+
+RESPONSE FORMAT - JSON ONLY:
+When you have a plan and operations ready, respond ONLY with a JSON block containing:
 {
-  "summary": "short summary of what changes you're making",
+  "summary": "[STEP N/M] Description of what this accomplishes",
   "operations": [
-    { "action": "create|update|delete|mkdir", "path": "relative/path/from/workspace", "content": "required for create/update" },
-    { "action": "execute", "command": "shell command to run", "cwd": "optional working directory" }
+    { "action": "execute", "command": "command for step 1", "cwd": "optional" },
+    { "action": "create", "path": "file/path.js", "content": "file content" },
+    { "action": "execute", "command": "command for step 2", "cwd": "optional" },
+    { "action": "update", "path": "file/path.js", "content": "updated content" }
   ]
 }
 
-Examples of valid operations:
-1. Create a new file:
+KEY RULES:
+1. Include narration in summaries: "npm install express | Create server.js | Run npm start"
+2. Combine execution and file operations intelligently (install deps, create files, run tests)
+3. Never propose the same failing command twice - always fix the root cause
+4. File operations are auto-applied; terminal commands require user approval ONCE (not for recovery steps)
+5. Use your error patterns to self-heal without asking the user
+6. If a command needs elevated privileges, explain why and provide alternatives first
+7. For any operation, validate success with concrete checks (file exists, command output, exit code 0)
+8. Keep operations sequential and logical - install before use, create before modify, test after build
+9. Use platform-aware commands (PowerShell on Windows, bash on Unix)
+10. Include helpful context: "Installing 5 packages...", "Creating React component...", etc.
+
+EXAMPLES OF GOOD AUTONOMOUS RESPONSES:
+
+Example 1 - Self-healing on module error:
 \`\`\`json
 {
-  "summary": "Creating a new component file",
+  "summary": "[STEP 1/2] Install missing dependencies | [STEP 2/2] Run the application",
   "operations": [
-    {
-      "action": "create",
-      "path": "src/components/Button.jsx",
-      "content": "import React from 'react';\\n\\nconst Button = ({ children }) => {\\n  return <button className='btn'>{children}</button>;\\n};\\n\\nexport default Button;"
-    }
+    { "action": "execute", "command": "npm install express body-parser", "cwd": "." },
+    { "action": "execute", "command": "npm start", "cwd": "." }
   ]
 }
 \`\`\`
 
-2. Update an existing file:
+Example 2 - Complex multi-step task with narration:
 \`\`\`json
 {
-  "summary": "Updating the main App component",
+  "summary": "[STEP 1/4] Create directories | [STEP 2/4] Create component files | [STEP 3/4] Update imports | [STEP 4/4] Verify with npm test",
   "operations": [
-    {
-      "action": "update",
-      "path": "src/App.js",
-      "content": "import React from 'react';\\nimport Button from './components/Button';\\n\\nfunction App() {\\n  return (\\n    <div className='App'>\\n      <h1>Hello World</h1>\\n      <Button>Click Me</Button>\\n    </div>\\n  );\\n}\\n\\nexport default App;"
-    }
+    { "action": "mkdir", "path": "src/components/Button" },
+    { "action": "create", "path": "src/components/Button/Button.jsx", "content": "..." },
+    { "action": "create", "path": "src/components/Button/Button.css", "content": "..." },
+    { "action": "update", "path": "src/App.jsx", "content": "..." },
+    { "action": "execute", "command": "npm test", "cwd": "." }
   ]
 }
 \`\`\`
 
-3. Execute a shell command:
+Example 3 - Port conflict resolution (autonomous):
+If npm start fails with "EADDRINUSE", automatically retry with:
 \`\`\`json
 {
-  "summary": "Running a build command",
+  "summary": "[STEP 1/2] Kill process on port 3000 | [STEP 2/2] Restart application",
   "operations": [
-    {
-      "action": "execute",
-      "command": "npm run build",
-      "cwd": "./my-project"
-    }
+    { "action": "execute", "command": "$ProcessOnPort = Get-NetTCPConnection -LocalPort 3000 | Select-Object -ExpandProperty OwningProcess; Stop-Process -Id $ProcessOnPort -Force", "cwd": "." },
+    { "action": "execute", "command": "npm start", "cwd": "." }
   ]
 }
 \`\`\`
 
-4. Combine file operations and commands:
-\`\`\`json
-{
-  "summary": "Setting up a new React project",
-  "operations": [
-    { "action": "mkdir", "path": "my-new-app" },
-    { "action": "create", "path": "my-new-app/package.json", "content": '{"name": "my-new-app", "version": "1.0.0"}' },
-    { "action": "execute", "command": "npm install", "cwd": "./my-new-app" }
-  ]
-}
-\`\`\`
-
-5. Run a Python script:
-\`\`\`json
-{
-  "summary": "Running a Python script",
-  "operations": [
-    { "action": "execute", "command": "python script.py" }
-  ]
-}
-\`\`\`
-
-Rules:
-- Use relative paths under the workspace folder for file operations.
-- For delete/mkdir, do not include content.
-- For execute actions, do not include path. Use command and optional cwd only.
-- For execute actions, provide the command to run and optionally the working directory (cwd).
-- If no operations are needed, return operations as an empty array.
-- Always provide a clear summary of what changes you're making.
-- Always return valid JSON in a single code block.
-- You can combine file operations and command execution in the same response.
+REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission to fix errors. User only approves the PLAN, not individual recovery steps.
 `
       }
 
@@ -4902,6 +5132,7 @@ Rules:
             pushActivity={pushActivity}
             command={terminalCommand}
             onCommandExecuted={() => setTerminalCommand('')}
+            onCommandFinished={handleTerminalCommandFinished}
           />
         </div>
       </div>
@@ -5280,7 +5511,9 @@ Rules:
             <div className="mb-2 text-sm font-semibold">Confirm Delete</div>
             <div className="text-sm text-gray-300">Are you sure you want to delete:</div>
             <div className="mt-2 rounded border border-gray-700 bg-[#252526] px-3 py-2 text-sm text-white wrap-break-word">
-              {deleteTarget}
+              {Array.isArray(deleteTarget) && deleteTarget.length > 1
+                ? `${deleteTarget.length} selected items`
+                : deleteTarget[0] || ''}
             </div>
             <div className="mt-3 text-xs text-gray-400">
               Use the arrow keys to switch between Delete and Cancel, then press Enter.
@@ -5290,7 +5523,7 @@ Rules:
                 type="button"
                 onClick={() => {
                   setShowDeleteConfirm(false)
-                  setDeleteTarget('')
+                  setDeleteTarget([])
                   setDeleteConfirmChoice('delete')
                 }}
                 className={`rounded px-3 py-1 text-sm ${deleteConfirmChoice === 'cancel' ? 'bg-[#3c3c3c] text-white ring-1 ring-white/20' : 'text-gray-300 hover:bg-[#3c3c3c]'}`}
