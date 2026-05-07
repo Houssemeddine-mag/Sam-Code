@@ -3,9 +3,15 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
 const api = {
+  getStartupWorkspacePath: () => {
+    const arg = process.argv.find((value) => value.startsWith('--workspacePath='))
+    if (!arg) return ''
+    return decodeURIComponent(arg.slice('--workspacePath='.length))
+  },
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
   openFile: () => ipcRenderer.invoke('dialog:openFile'),
   openFolderInNewWindow: () => ipcRenderer.invoke('dialog:openFolderNewWindow'),
+  newWindowWithFolder: (folderPath) => ipcRenderer.invoke('window:newWithFolder', folderPath),
   newWindow: () => ipcRenderer.invoke('window:new'),
   readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', dirPath),
   readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),

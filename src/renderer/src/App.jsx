@@ -33,8 +33,11 @@ const STORAGE_KEYS = {
   apiProvider: 'samcode:apiProvider',
   selectedModel: 'samcode:selectedModel',
   appearanceMode: 'samcode:appearanceMode',
+  autoSaveEnabled: 'samcode:autoSaveEnabled',
+  recentFolders: 'samcode:recentFolders',
   preferredModels: 'samcode:preferredModels',
-  installedPackages: 'samcode:installedPackages'
+  installedPackages: 'samcode:installedPackages',
+  mode: 'samcode:mode'
 }
 
 const DEFAULT_PREFERRED_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
@@ -77,7 +80,19 @@ function App() {
   const [activePath, setActivePath] = useState('')
   const [tabs, setTabs] = useState([])
   const [saving, setSaving] = useState(false)
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false)
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(
+    () => localStorage.getItem(STORAGE_KEYS.autoSaveEnabled) === 'true'
+  )
+  const [recentFolders, setRecentFolders] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.recentFolders)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  })
+  const [showMoreRecent, setShowMoreRecent] = useState(false)
   const [fileLoading, setFileLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const generationAbortRef = useRef(null)
@@ -90,13 +105,20 @@ function App() {
   const [selectedModel, setSelectedModel] = useState(
     () => localStorage.getItem(STORAGE_KEYS.selectedModel) || ''
   )
-  const [mode, setMode] = useState('chat')
+  const [mode, setModeState] = useState(() => localStorage.getItem(STORAGE_KEYS.mode) || 'chat')
+  const setMode = (nextMode) => {
+    setModeState(nextMode)
+    localStorage.setItem(STORAGE_KEYS.mode, nextMode)
+  }
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState([])
   const [availableModels, setAvailableModels] = useState([])
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsError, setModelsError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [pendingAgentProposal, setPendingAgentProposal] = useState(null)
+  const [pendingAgentStepIndex, setPendingAgentStepIndex] = useState(0)
+  const [approvalBusy, setApprovalBusy] = useState(false)
   useEffect(() => {
     // Register/unregister Java helpers only when the 'java-language' extension is installed
     const isInstalled = Array.isArray(installedPackages)
@@ -289,7 +311,7 @@ function App() {
   const [toasts, setToasts] = useState([])
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalCommand, setTerminalCommand] = useState('')
-  const [showAgentPanel, setShowAgentPanel] = useState(true)
+  const [showAgentPanel, setShowAgentPanel] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [rightWidth, setRightWidth] = useState(360)
   const [terminalHeight, setTerminalHeight] = useState(320)
@@ -1230,6 +1252,20 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [code, autoSaveEnabled, activePath])
 
+  // Persist auto save preference
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.autoSaveEnabled, autoSaveEnabled ? 'true' : 'false')
+    } catch {}
+  }, [autoSaveEnabled])
+
+  // Persist recent folders when changed
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.recentFolders, JSON.stringify(recentFolders))
+    } catch {}
+  }, [recentFolders])
+
   useEffect(() => {
     const ipc = window.electron?.ipcRenderer
     if (!ipc?.on) return undefined
@@ -1248,6 +1284,69 @@ function App() {
       ipc.removeListener('workspace:open', handler)
     }
   }, [])
+
+  useEffect(() => {
+    const startupWorkspace =
+      typeof window.api?.getStartupWorkspacePath === 'function'
+        ? window.api.getStartupWorkspacePath()
+        : ''
+    const params = new URLSearchParams(window.location.search)
+    const workspace = startupWorkspace || params.get('workspace') || params.get('folder')
+    if (!workspace) return undefined
+
+    const openFromStartup = async () => {
+      setRootFolder(workspace)
+      setExpanded({ [workspace]: true })
+      setStatus(`Loaded folder: ${workspace}`)
+      pushActivity('success', `Workspace opened in this window: ${workspace}`)
+      await loadDirectory(workspace)
+    }
+
+    openFromStartup()
+    return undefined
+  }, [])
+
+  const addRecentFolder = (folderPath) => {
+    if (!folderPath) return
+    try {
+      setRecentFolders((current) => {
+        const next = [folderPath, ...current.filter((p) => p !== folderPath)]
+        return next.slice(0, 50)
+      })
+    } catch {}
+  }
+
+  const openRecentFolder = async (folderPath) => {
+    if (!folderPath) return
+    // If no workspace currently open, open in this window (welcome flow)
+    if (!rootFolder) {
+      setRootFolder(folderPath)
+      setStatus(`Loaded folder: ${folderPath}`)
+      pushActivity('success', `Workspace opened: ${folderPath}`)
+      setExpanded((current) => ({ ...current, [folderPath]: true }))
+      await loadDirectory(folderPath)
+      addRecentFolder(folderPath)
+      return
+    }
+
+    // If a workspace is open, open the recent folder in a new window
+    try {
+      if (typeof window.api.newWindowWithFolder === 'function') {
+        await window.api.newWindowWithFolder(folderPath)
+      } else if (typeof window.api.openFolderInNewWindow === 'function') {
+        // fallback to the open-folder-then-new-window flow
+        await window.api.openFolderInNewWindow()
+      } else {
+        await window.api.newWindow?.()
+      }
+      addRecentFolder(folderPath)
+    } catch (e) {
+      pushActivity(
+        'error',
+        `Could not open recent folder in new window: ${String(e?.message || e)}`
+      )
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -1638,11 +1737,24 @@ function App() {
       )
     } catch (error) {
       if (error.name === 'AbortError') return
-      console.error(error)
+      // Provide clearer messaging for network/fetch failures
+      const msg = String(error?.message || error)
+      console.error('loadModels error', error)
       setAvailableModels([])
-      setModelsError(error.message)
-      setStatus(`Could not load models from ${effectiveProvider}: ${error.message}`)
-      pushActivity('error', `Failed to load ${effectiveProvider} models: ${error.message}`)
+      if (
+        msg.toLowerCase().includes('fetch failed') ||
+        msg.toLowerCase().includes('networkerror') ||
+        msg.toLowerCase().includes('ecoff')
+      ) {
+        const friendly = `Could not contact ${effectiveProvider} provider. Check network and provider settings.`
+        setModelsError(friendly)
+        setStatus(friendly)
+        pushActivity('error', friendly)
+      } else {
+        setModelsError(msg)
+        setStatus(`Could not load models from ${effectiveProvider}: ${msg}`)
+        pushActivity('error', `Failed to load ${effectiveProvider} models: ${msg}`)
+      }
     } finally {
       setModelsLoading(false)
     }
@@ -1677,13 +1789,36 @@ function App() {
 
   const openFolder = async () => {
     if (!hasApi()) return
-    const folderPath = await window.api.openFolder()
-    if (!folderPath) return
-    setRootFolder(folderPath)
-    setStatus(`Loaded folder: ${folderPath}`)
-    pushActivity('success', `Workspace opened: ${folderPath}`)
-    setExpanded({ [folderPath]: true })
-    await loadDirectory(folderPath)
+    // If there is no workspace open, open in this window (welcome flow)
+    if (!rootFolder) {
+      const folderPath = await window.api.openFolder()
+      if (!folderPath) return
+      setRootFolder(folderPath)
+      setStatus(`Loaded folder: ${folderPath}`)
+      pushActivity('success', `Workspace opened: ${folderPath}`)
+      setExpanded({ [folderPath]: true })
+      await loadDirectory(folderPath)
+      try {
+        setRecentFolders((current) => {
+          const next = [folderPath, ...current.filter((p) => p !== folderPath)]
+          return next.slice(0, 50)
+        })
+      } catch {}
+      return
+    }
+
+    // If a workspace is already open, open the chosen folder in a new window
+    try {
+      const folderPath = await window.api.openFolderInNewWindow()
+      if (!folderPath) return
+      // record in recent folders (local list)
+      setRecentFolders((current) => {
+        const next = [folderPath, ...current.filter((p) => p !== folderPath)]
+        return next.slice(0, 50)
+      })
+    } catch (e) {
+      pushActivity('error', `Failed to open folder in new window: ${String(e?.message || e)}`)
+    }
   }
 
   const ensureJoinedPath = (base, name) => {
@@ -2611,8 +2746,381 @@ function App() {
     return result
   }
 
+  const describeAgentOperation = (operation) => {
+    const action = String(operation?.action || '').toLowerCase()
+    const path = String(operation?.path || '').trim()
+    const command = String(operation?.command || '').trim()
+
+    if (action === 'execute') {
+      return command ? `Run command: ${command}` : 'Run command'
+    }
+
+    if (action === 'mkdir') {
+      return `Create folder: ${path}`
+    }
+
+    if (action === 'delete') {
+      return `Delete: ${path}`
+    }
+
+    if (action === 'create' || action === 'update' || action === 'upsert' || action === 'write') {
+      return `${action === 'create' ? 'Create' : 'Update'} file: ${path}`
+    }
+
+    return `${action || 'unknown'}: ${path || 'unknown path'}`
+  }
+
+  const findNextExecuteIndex = (operations, startIndex = 0) => {
+    if (!Array.isArray(operations)) return -1
+
+    for (let index = Math.max(0, startIndex); index < operations.length; index += 1) {
+      if (String(operations[index]?.action || '').toLowerCase() === 'execute') {
+        return index
+      }
+    }
+
+    return -1
+  }
+
+  const collectFileOperations = (operations, startIndex = 0) => {
+    if (!Array.isArray(operations)) return []
+
+    return operations
+      .slice(Math.max(0, startIndex))
+      .filter((operation) => String(operation?.action || '').toLowerCase() !== 'execute')
+  }
+
+  const buildCommandResultMessage = (operation, result) => {
+    const stdout = String(result?.stdout || '').trim()
+    const stderr = String(result?.stderr || '').trim()
+    const code = result?.code
+
+    return [
+      `Executed: ${describeAgentOperation(operation)}`,
+      `Exit code: ${code}`,
+      stdout ? `Stdout:\n${stdout}` : '',
+      stderr ? `Stderr:\n${stderr}` : ''
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  const buildAgentResultMessage = (payload, result) => {
+    const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
+    const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
+
+    const appliedList = Array.isArray(result?.applied)
+      ? result.applied
+          .slice(0, 8)
+          .map((operation) => `- ${operation.action}: ${operation.path}`)
+          .join('\n')
+      : ''
+    const failedList = Array.isArray(result?.failed)
+      ? result.failed
+          .slice(0, 5)
+          .map(
+            (operation) =>
+              `- ${operation.action || 'unknown'} ${operation.path || ''}: ${operation.reason || 'error'}`
+          )
+          .join('\n')
+      : ''
+
+    const commandOutput = Array.isArray(result?.applied)
+      ? result.applied
+          .filter((operation) => operation?.action === 'execute' && operation?.result)
+          .slice(0, 3)
+          .map((operation) => {
+            const stdout = String(operation?.result?.stdout || '').trim()
+            const stderr = String(operation?.result?.stderr || '').trim()
+            const code = operation?.result?.code
+            return [
+              `Command: ${operation.command}`,
+              `Exit code: ${code}`,
+              stdout ? `Stdout:\n${stdout}` : '',
+              stderr ? `Stderr:\n${stderr}` : ''
+            ]
+              .filter(Boolean)
+              .join('\n')
+          })
+          .join('\n\n')
+      : ''
+
+    const summaryLine = payload.summary || 'Workspace operations executed.'
+    return [
+      summaryLine,
+      `Applied: ${appliedCount}`,
+      `Failed: ${failedCount}`,
+      appliedList ? `\nChanged files:\n${appliedList}` : '',
+      failedList ? `\nFailed operations:\n${failedList}` : '',
+      commandOutput ? `\nCommand output:\n${commandOutput}` : ''
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  const executeApprovedAgentOperations = async (payload) => {
+    if (!rootFolder) {
+      throw new Error('Open a folder first so the agent can apply file operations.')
+    }
+
+    const operations = Array.isArray(payload?.operations) ? payload.operations : []
+    const currentOperation = operations[pendingAgentStepIndex]
+
+    if (!currentOperation) {
+      const fileOperations = collectFileOperations(operations, 0)
+      if (!fileOperations.length) {
+        return payload.summary || 'No workspace changes were needed.'
+      }
+
+      const result = await window.api.applyAgentOperations({
+        rootFolder,
+        operations: fileOperations
+      })
+
+      const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
+      const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
+
+      if (rootFolder) {
+        await loadDirectory(rootFolder)
+      }
+
+      if (activePath) {
+        const activeFileWasDeleted = Array.isArray(result?.applied)
+          ? result.applied.some(
+              (operation) =>
+                operation?.action === 'delete' &&
+                String(operation?.path || '').toLowerCase() === activePath.toLowerCase()
+            )
+          : false
+
+        if (activeFileWasDeleted) {
+          setActivePath('')
+          setCode('// Active file was deleted by agent operation.')
+          setTabs((current) => current.filter((tab) => tab.path !== activePath))
+        } else {
+          await openFile(activePath)
+        }
+      }
+
+      if (failedCount > 0) {
+        setStatus(`Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+        pushActivity('warning', `Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+      } else {
+        setStatus(`Agent applied ${appliedCount} change(s).`)
+        pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
+      }
+
+      return buildAgentResultMessage(payload, result)
+    }
+
+    if (String(currentOperation?.action || '').toLowerCase() === 'execute') {
+      const command = String(currentOperation?.command || '').trim()
+      if (!command) {
+        throw new Error('Execute action requires a command.')
+      }
+
+      const commandResult = await window.api.runCommand({
+        command,
+        cwd: String(currentOperation?.cwd || rootFolder || '').trim() || rootFolder,
+        shell: 'powershell'
+      })
+
+      const commandMessage = buildCommandResultMessage(currentOperation, commandResult)
+      setMessages((current) => [
+        ...current,
+        { role: 'assistant', kind: 'command', content: commandMessage }
+      ])
+
+      if (Number(commandResult?.code) !== 0) {
+        setStatus(`Command failed with exit code ${commandResult?.code}.`)
+        pushActivity('warning', `Command failed: ${command}`)
+        return commandMessage
+      }
+
+      const nextExecuteIndex = findNextExecuteIndex(operations, pendingAgentStepIndex + 1)
+      if (nextExecuteIndex >= 0) {
+        setPendingAgentStepIndex(nextExecuteIndex)
+        setStatus('Review the next command and allow or skip it.')
+        pushActivity(
+          'info',
+          `Command completed. Next step is ${describeAgentOperation(operations[nextExecuteIndex])}.`
+        )
+        return commandMessage
+      }
+
+      const fileOperations = collectFileOperations(operations, pendingAgentStepIndex + 1)
+      if (fileOperations.length === 0) {
+        setStatus(payload.summary || 'Agent finished with no file changes.')
+        pushActivity('info', 'Agent finished with no file changes.')
+        return [payload.summary || 'Agent finished with no file changes.', commandMessage]
+          .filter(Boolean)
+          .join('\n\n')
+      }
+
+      const result = await window.api.applyAgentOperations({
+        rootFolder,
+        operations: fileOperations
+      })
+
+      const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
+      const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
+
+      if (rootFolder) {
+        await loadDirectory(rootFolder)
+      }
+
+      if (activePath) {
+        const activeFileWasDeleted = Array.isArray(result?.applied)
+          ? result.applied.some(
+              (operation) =>
+                operation?.action === 'delete' &&
+                String(operation?.path || '').toLowerCase() === activePath.toLowerCase()
+            )
+          : false
+
+        if (activeFileWasDeleted) {
+          setActivePath('')
+          setCode('// Active file was deleted by agent operation.')
+          setTabs((current) => current.filter((tab) => tab.path !== activePath))
+        } else {
+          await openFile(activePath)
+        }
+      }
+
+      if (failedCount > 0) {
+        setStatus(`Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+        pushActivity('warning', `Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+      } else {
+        setStatus(`Agent applied ${appliedCount} change(s).`)
+        pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
+      }
+
+      return [buildAgentResultMessage(payload, result), commandMessage].filter(Boolean).join('\n\n')
+    }
+
+    const fileOperations = collectFileOperations(operations, pendingAgentStepIndex)
+    if (!fileOperations.length) {
+      return payload.summary || 'No workspace changes were needed.'
+    }
+
+    const result = await window.api.applyAgentOperations({
+      rootFolder,
+      operations: fileOperations
+    })
+
+    const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
+    const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
+
+    if (rootFolder) {
+      await loadDirectory(rootFolder)
+    }
+
+    if (activePath) {
+      const activeFileWasDeleted = Array.isArray(result?.applied)
+        ? result.applied.some(
+            (operation) =>
+              operation?.action === 'delete' &&
+              String(operation?.path || '').toLowerCase() === activePath.toLowerCase()
+          )
+        : false
+
+      if (activeFileWasDeleted) {
+        setActivePath('')
+        setCode('// Active file was deleted by agent operation.')
+        setTabs((current) => current.filter((tab) => tab.path !== activePath))
+      } else {
+        await openFile(activePath)
+      }
+    }
+
+    if (failedCount > 0) {
+      setStatus(`Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+      pushActivity('warning', `Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+    } else {
+      setStatus(`Agent applied ${appliedCount} change(s).`)
+      pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
+    }
+
+    return buildAgentResultMessage(payload, result)
+  }
+
+  const approvePendingAgentProposal = async () => {
+    if (!pendingAgentProposal || approvalBusy) return
+
+    setApprovalBusy(true)
+    pushActivity('info', 'Approved agent proposal. Executing requested workspace changes.')
+    try {
+      const resultMessage = await executeApprovedAgentOperations(pendingAgentProposal)
+      setMessages((current) => [
+        ...current,
+        {
+          role: 'assistant',
+          kind: 'chat',
+          content: resultMessage
+        }
+      ])
+      const operations = Array.isArray(pendingAgentProposal.operations)
+        ? pendingAgentProposal.operations
+        : []
+      const nextExecuteIndex = findNextExecuteIndex(operations, pendingAgentStepIndex + 1)
+
+      if (nextExecuteIndex >= 0) {
+        setPendingAgentStepIndex(nextExecuteIndex)
+        setStatus('Review the next command and allow or skip it.')
+      } else {
+        setPendingAgentProposal(null)
+        setPendingAgentStepIndex(0)
+        setStatus('Agent finished command steps; file changes were applied automatically.')
+      }
+    } catch (error) {
+      const message = String(error?.message || error)
+      setStatus(`Agent approval failed: ${message}`)
+      pushActivity('error', `Agent approval failed: ${message}`)
+      setMessages((current) => [
+        ...current,
+        {
+          role: 'assistant',
+          kind: 'chat',
+          content: `Error applying approved actions: ${message}`
+        }
+      ])
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
+
+  const skipPendingAgentProposal = () => {
+    if (!pendingAgentProposal) return
+
+    pushActivity('warning', 'Skipped the agent proposal.')
+    setMessages((current) => [
+      ...current,
+      {
+        role: 'assistant',
+        kind: 'chat',
+        content: `Skipped: ${pendingAgentProposal.summary || 'Agent proposal'}`
+      }
+    ])
+    setPendingAgentProposal(null)
+    setPendingAgentStepIndex(0)
+  }
+
   const sendMessage = async () => {
-    if (!input.trim() || sending) return
+    if (pendingAgentProposal) {
+      const operations = Array.isArray(pendingAgentProposal.operations)
+        ? pendingAgentProposal.operations
+        : []
+      const nextExecuteIndex = findNextExecuteIndex(operations, pendingAgentStepIndex + 1)
+      if (nextExecuteIndex >= 0) {
+        setPendingAgentStepIndex(nextExecuteIndex)
+        setStatus('Review the next command and allow or skip it.')
+      } else {
+        setPendingAgentProposal(null)
+        setPendingAgentStepIndex(0)
+        setStatus('Agent proposal skipped.')
+      }
+      return
+    }
 
     const now = Date.now()
     if (rateLimitedUntil > now) {
@@ -2623,13 +3131,13 @@ function App() {
     }
 
     if (!apiKey.trim()) {
-      setStatus('Add your OpenRouter API key in Settings first.')
-      setSettingsOpen(true)
+      setStatus('Add your API key in Settings before sending agent prompts.')
+      pushActivity('warning', 'Missing API key. Open Settings manually to configure it.')
       return
     }
     if (!selectedModel) {
-      setStatus('Load and select an OpenRouter model in Settings first.')
-      setSettingsOpen(true)
+      setStatus('Select a model in Settings before sending agent prompts.')
+      pushActivity('warning', 'Missing model selection. Open Settings manually to choose one.')
       return
     }
 
@@ -2648,6 +3156,19 @@ function App() {
         systemPrompt += `
 You are working inside this workspace folder path: ${rootFolder || 'NO_WORKSPACE_SELECTED'}.
 Active file path: ${activePath || 'NO_ACTIVE_FILE'}.
+
+You can inspect the workspace by proposing terminal commands such as Get-ChildItem, git status, npm run build, npm test, or other read-only checks when needed.
+Any command or file-changing action must be proposed first and will be shown to the user for approval before it runs.
+When debugging, inspect the folder and relevant files first, then propose the smallest useful command or edit plan.
+Only propose the next immediate step, not the whole pipeline. Prefer one command at a time, then wait for its terminal output before proposing another command.
+After the command phase is done, you may propose file changes that can be applied automatically without user approval.
+
+CRITICAL ERROR RECOVERY: When a command fails (exit code != 0), analyze the error message and propose a corrected version immediately:
+- If "capital letters not allowed" (npm naming): propose lowercase alternative
+- If "file not found" or "no such file": propose checking paths first, or create missing files
+- If "permission denied": propose using different access methods or tools
+- If "not installed" or "command not found": propose installing it or using alternatives
+Do NOT ask the user to fix it. Analyze the error and propose the next command to solve it.
 
 When the user asks for changes, respond ONLY with JSON in a single \`\`\`json block using:
 {
@@ -2863,79 +3384,58 @@ Rules:
             }
           ])
         } else {
-          const result = await window.api.applyAgentOperations({
-            rootFolder,
-            operations: payload.operations
-          })
+          const firstExecuteIndex = findNextExecuteIndex(payload.operations, 0)
 
-          const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
-          const failedCount = Array.isArray(result?.failed) ? result.failed.length : 0
-
-          if (rootFolder) {
-            await loadDirectory(rootFolder)
-          }
-
-          if (activePath) {
-            const activeFileWasDeleted = Array.isArray(result?.applied)
-              ? result.applied.some(
-                  (operation) =>
-                    operation?.action === 'delete' &&
-                    String(operation?.path || '').toLowerCase() === activePath.toLowerCase()
-                )
-              : false
-
-            if (activeFileWasDeleted) {
-              setActivePath('')
-              setCode('// Active file was deleted by agent operation.')
-              setTabs((current) => current.filter((tab) => tab.path !== activePath))
-            } else {
-              await openFile(activePath)
+          if (firstExecuteIndex === -1) {
+            setPendingAgentProposal(null)
+            setPendingAgentStepIndex(0)
+            try {
+              const fileResultMessage = await executeApprovedAgentOperations(payload)
+              setMessages((current) => [
+                ...current,
+                { role: 'assistant', kind: 'chat', content: fileResultMessage }
+              ])
+            } catch (error) {
+              const message = String(error?.message || error)
+              setStatus(`Agent file changes failed: ${message}`)
+              pushActivity('error', `Agent file changes failed: ${message}`)
+              setMessages((current) => [
+                ...current,
+                {
+                  role: 'assistant',
+                  kind: 'chat',
+                  content: `Error applying file changes: ${message}`
+                }
+              ])
             }
-          }
-
-          if (failedCount > 0) {
-            setStatus(`Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
-            pushActivity(
-              'warning',
-              `Agent applied ${appliedCount} change(s), ${failedCount} failed.`
-            )
           } else {
-            setStatus(`Agent applied ${appliedCount} change(s).`)
-            pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
+            setPendingAgentProposal(payload)
+            setPendingAgentStepIndex(firstExecuteIndex)
+            setStatus('Review the next command and allow or skip it.')
+            pushActivity(
+              'info',
+              `Agent proposed ${payload.operations.length} action(s) for stepwise execution.`
+            )
+            setMessages((current) => [
+              ...current,
+              {
+                role: 'assistant',
+                kind: 'approval',
+                operationIndex: firstExecuteIndex,
+                operations: payload.operations,
+                summary:
+                  payload.summary ||
+                  'I prepared the first command. Review and choose Allow or Skip.'
+              }
+            ])
           }
-
-          const appliedList = Array.isArray(result?.applied)
-            ? result.applied
-                .slice(0, 8)
-                .map((operation) => `- ${operation.action}: ${operation.path}`)
-                .join('\n')
-            : ''
-          const failedList = Array.isArray(result?.failed)
-            ? result.failed
-                .slice(0, 5)
-                .map(
-                  (operation) =>
-                    `- ${operation.action || 'unknown'} ${operation.path || ''}: ${operation.reason || 'error'}`
-                )
-                .join('\n')
-            : ''
-
-          const summaryLine = payload.summary || 'Workspace operations executed.'
-          const resultMessage = [
-            summaryLine,
-            `Applied: ${appliedCount}`,
-            `Failed: ${failedCount}`,
-            appliedList ? `\nChanged files:\n${appliedList}` : '',
-            failedList ? `\nFailed operations:\n${failedList}` : ''
-          ]
-            .filter(Boolean)
-            .join('\n')
-
-          setMessages((current) => [...current, { role: 'assistant', content: resultMessage }])
         }
       } else {
         setStatus('Chat response received.')
-        setMessages((current) => [...current, { role: 'assistant', content: responseText }])
+        setMessages((current) => [
+          ...current,
+          { role: 'assistant', kind: 'chat', content: responseText }
+        ])
       }
     } catch (error) {
       if (error?.name === 'AbortError') {
@@ -3455,14 +3955,12 @@ Rules:
           <button
             type="button"
             onClick={() => setShowAgentPanel((current) => !current)}
-            className={`rounded px-1.5 py-0.5 text-xs font-semibold transition-colors ${showAgentPanel ? 'bg-blue-600 text-white' : 'text-blue-400 hover:bg-[#3c3c3c] hover:text-blue-300'}`}
+            className={`inline-flex items-center rounded p-1 text-xs font-semibold transition-colors ${showAgentPanel ? 'bg-blue-600 text-white' : 'text-blue-400 hover:bg-[#3c3c3c] hover:text-blue-300'}`}
+            aria-label={showAgentPanel ? 'Close agent panel' : 'Open agent panel'}
+            title={showAgentPanel ? 'Close agent panel' : 'Open agent panel'}
           >
-            Sam Code
+            <Bot size={16} />
           </button>
-          <div className="text-xs font-semibold text-gray-300">
-            <Bot size={18} className="mr-1 inline-block align-[-2px]" />
-            Sam Code
-          </div>
         </div>
       </header>
 
@@ -3506,7 +4004,7 @@ Rules:
                     </button>
                   </div>
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto py-2 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10 hover:scrollbar-thumb-white/20">
+                <div className="samcode-scrollbar min-h-0 flex-1 overflow-auto py-2">
                   {rootFolder ? (
                     <div>
                       <div className="px-4 pb-2 text-[11px] uppercase tracking-[0.25em] text-gray-500">
@@ -4061,6 +4559,37 @@ Rules:
                     >
                       Add your api for sam code
                     </button>
+                    {Array.isArray(recentFolders) && recentFolders.length > 0 && (
+                      <div>
+                        <div className="mt-3 mb-2 text-sm font-semibold text-gray-200">
+                          Recent folders
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          {(showMoreRecent ? recentFolders : recentFolders.slice(0, 4)).map((p) => (
+                            <button
+                              key={p}
+                              type="button"
+                              onClick={() => openRecentFolder(p)}
+                              className="text-left text-gray-200 hover:underline hover:text-white text-sm"
+                            >
+                              <div className="text-sm font-medium">{basenameFromPath(p)}</div>
+                              <div className="text-[11px] text-gray-400">{p}</div>
+                            </button>
+                          ))}
+                          {recentFolders.length > 4 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowMoreRecent((s) => !s)}
+                              className="text-left text-blue-400 hover:text-blue-300 hover:underline transition-colors text-sm font-medium mt-2"
+                            >
+                              {showMoreRecent
+                                ? 'Show less'
+                                : `Show more (${recentFolders.length - 4})`}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -4089,7 +4618,7 @@ Rules:
                   <div className="text-xs text-gray-500">Use the controls below</div>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-auto p-4">
+                <div className="samcode-scrollbar min-h-0 flex-1 overflow-auto p-4">
                   {messages.length === 0 ? (
                     <div className="rounded border border-dashed border-gray-700 p-4 text-center text-sm text-gray-400">
                       <Bot size={24} className="mx-auto mb-2 text-blue-400" />
@@ -4098,22 +4627,101 @@ Rules:
                   ) : (
                     <div className="flex flex-col gap-2">
                       {messages.map((message, index) => (
-                        <div
-                          key={index}
-                          className={`max-w-full wrap-break-word rounded-md px-3 py-2 text-sm ${
-                            message.role === 'user'
-                              ? 'self-end bg-blue-600 text-white'
-                              : 'self-start bg-[#2b2b2d] text-gray-100'
-                          }`}
-                        >
-                          <div className="mb-1 flex items-center gap-2">
-                            <div className="text-[11px] font-medium opacity-80">
-                              {message.role === 'user' ? 'You' : 'Sam'}
+                        <div key={index}>
+                          {message.kind === 'approval' ? (
+                            <div className="rounded-lg border border-blue-500/30 bg-[#20252f] p-3 shadow-lg">
+                              {(() => {
+                                const operations = Array.isArray(message.operations)
+                                  ? message.operations
+                                  : []
+                                const currentOpIdx = message.operationIndex || 0
+                                const currentOperation = operations[currentOpIdx]
+                                const remainingCommands = operations
+                                  .slice(currentOpIdx)
+                                  .filter(
+                                    (op) => String(op?.action || '').toLowerCase() === 'execute'
+                                  ).length
+                                const remainingFiles = operations
+                                  .slice(currentOpIdx)
+                                  .filter(
+                                    (op) => String(op?.action || '').toLowerCase() !== 'execute'
+                                  ).length
+
+                                return (
+                                  <>
+                                    <div className="mb-2 flex items-start justify-between gap-3">
+                                      <div>
+                                        <div className="text-xs font-semibold uppercase tracking-wider text-blue-300">
+                                          Approval required
+                                        </div>
+                                        <div className="mt-1 text-sm text-gray-200">
+                                          {message.summary ||
+                                            'Review the next agent action before it runs.'}
+                                        </div>
+                                      </div>
+                                      <div className="text-right text-[11px] text-gray-400">
+                                        <div>{remainingCommands} command(s)</div>
+                                        <div>{remainingFiles} file action(s)</div>
+                                      </div>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                      {currentOperation ? (
+                                        <div className="rounded border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-200">
+                                          <div className="font-medium text-white">
+                                            {describeAgentOperation(currentOperation)}
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div className="rounded border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-200">
+                                          File changes will apply automatically.
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div className="mt-3 flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => skipPendingAgentProposal()}
+                                        disabled={approvalBusy}
+                                        className="rounded border border-gray-600 bg-[#2b2b2d] px-3 py-1.5 text-xs font-semibold text-gray-200 hover:bg-[#38383a] disabled:cursor-not-allowed disabled:opacity-60"
+                                      >
+                                        Skip
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          setTerminalOpen(true)
+                                          await approvePendingAgentProposal()
+                                        }}
+                                        disabled={approvalBusy}
+                                        className="rounded bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                                      >
+                                        {approvalBusy ? 'Running...' : 'Allow'}
+                                      </button>
+                                    </div>
+                                  </>
+                                )
+                              })()}
                             </div>
-                          </div>
-                          <div className="whitespace-pre-wrap leading-relaxed text-sm">
-                            {message.content}
-                          </div>
+                          ) : (
+                            <div
+                              className={`max-w-full wrap-break-word rounded-md px-3 py-2 text-sm ${
+                                message.role === 'user'
+                                  ? 'self-end bg-blue-600 text-white'
+                                  : 'self-start bg-[#2b2b2d] text-gray-100'
+                              }`}
+                            >
+                              <div className="mb-1 flex items-center gap-2">
+                                <div className="text-[11px] font-medium opacity-80">
+                                  {message.role === 'user' ? 'You' : 'Sam'}
+                                </div>
+                              </div>
+                              <div className="whitespace-pre-wrap leading-relaxed text-sm">
+                                {message.content}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

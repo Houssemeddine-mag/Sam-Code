@@ -12,6 +12,7 @@ import { registerMarketplaceHandlers, activateInstalledPackages } from './market
 
 const terminalSessions = new Map()
 const notebookSessions = new Map()
+const appWindows = new Set()
 const PYTHON_EXECUTABLE_NAMES =
   process.platform === 'win32' ? ['python.exe', 'python3.exe'] : ['python', 'python3', 'pypy3']
 
@@ -781,6 +782,12 @@ function createWindow() {
     mainWindow.show()
   })
 
+  mainWindow.on('closed', () => {
+    appWindows.delete(mainWindow)
+  })
+
+  appWindows.add(mainWindow)
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
@@ -793,6 +800,59 @@ function createWindow() {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+}
+
+function buildWorkspaceUrl(folderPath) {
+  const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+  if (is.dev && rendererUrl) {
+    const url = new URL(rendererUrl)
+    url.searchParams.set('workspace', folderPath)
+    return { type: 'url', value: url.toString() }
+  }
+
+  return { type: 'file', value: join(__dirname, '../renderer/index.html') }
+}
+
+async function loadWindowWithWorkspace(win, folderPath) {
+  const target = buildWorkspaceUrl(folderPath)
+  if (target.type === 'url') {
+    await win.loadURL(target.value)
+    return
+  }
+
+  await win.loadFile(target.value, { query: { workspace: folderPath } })
+}
+
+function createWorkspaceWindow(folderPath) {
+  const win = new BrowserWindow({
+    width: 900,
+    height: 670,
+    show: false,
+    autoHideMenuBar: true,
+    ...(process.platform === 'linux' ? { icon } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      additionalArguments: [`--workspacePath=${encodeURIComponent(folderPath)}`]
+    }
+  })
+
+  win.on('ready-to-show', () => {
+    win.maximize()
+    win.show()
+  })
+
+  win.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  win.on('closed', () => {
+    appWindows.delete(win)
+  })
+
+  appWindows.add(win)
+  return win
 }
 
 // This method will be called when Electron has finished
@@ -1571,8 +1631,11 @@ app.whenReady().then(() => {
           return await listOllamaModels(value)
       }
     } catch (error) {
-      console.error(`Failed to load ${providerToUse} models`, error)
-      throw error
+      const msg = String(error?.message || error)
+      const friendly = `Could not load ${providerToUse} models from '${value}': ${msg}`
+      console.error(friendly, error)
+      // Throw a new Error with a friendly, contextual message so renderer receives clearer diagnostics
+      throw new Error(friendly)
     }
   })
 
@@ -1585,33 +1648,30 @@ app.whenReady().then(() => {
     if (canceled || filePaths.length === 0) return null
     const folderPath = filePaths[0]
 
-    // Create a new BrowserWindow for the new workspace
-    const newWin = new BrowserWindow({
-      width: 900,
-      height: 670,
-      show: false,
-      autoHideMenuBar: true,
-      ...(process.platform === 'linux' ? { icon } : {}),
-      webPreferences: {
-        preload: join(__dirname, '../preload/index.js'),
-        sandbox: false
-      }
-    })
+    const newWin = createWorkspaceWindow(folderPath)
 
     newWin.on('ready-to-show', () => newWin.show())
 
-    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-      await newWin.loadURL(process.env['ELECTRON_RENDERER_URL'])
-    } else {
-      await newWin.loadFile(join(__dirname, '../renderer/index.html'))
-    }
-
-    // send workspace path when ready
-    newWin.webContents.once('did-finish-load', () => {
-      newWin.webContents.send('workspace:open', folderPath)
-    })
+    await loadWindowWithWorkspace(newWin, folderPath)
 
     return folderPath
+  })
+
+  ipcMain.handle('window:newWithFolder', async (_, folderPath) => {
+    try {
+      if (!folderPath) return null
+
+      const newWin = createWorkspaceWindow(folderPath)
+
+      newWin.on('ready-to-show', () => newWin.show())
+
+      await loadWindowWithWorkspace(newWin, folderPath)
+
+      return folderPath
+    } catch (e) {
+      console.error('window:newWithFolder failed', e)
+      return null
+    }
   })
 
   ipcMain.handle('window:new', async () => {
