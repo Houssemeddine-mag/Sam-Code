@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sam Code</title>
-    <link rel="icon" href="../resources/1.png" type="image/png" />
+    <link rel="icon" href="./1.png" type="image/png" />
     <style>
       * {
         box-sizing: border-box;
@@ -467,7 +467,9 @@
         bottom: 9px;
         border-radius: 50% 50% 35% 35%;
         background: #fff;
-        box-shadow: inset -6px 0 0 -2px #000, inset 6px 0 0 -2px #000;
+        box-shadow:
+          inset -6px 0 0 -2px #000,
+          inset 6px 0 0 -2px #000;
       }
       .download-card h3 {
         font-size: 1.08rem;
@@ -646,7 +648,9 @@
         margin-bottom: 0;
       }
       .agent-section .grid {
-        transition: transform 0.35s ease, opacity 0.35s ease;
+        transition:
+          transform 0.35s ease,
+          opacity 0.35s ease;
       }
       .agent-section .card {
         position: relative;
@@ -660,7 +664,12 @@
         content: '';
         position: absolute;
         inset: 0;
-        background: linear-gradient(135deg, rgba(145, 230, 255, 0.08), transparent 45%, rgba(109, 124, 255, 0.08));
+        background: linear-gradient(
+          135deg,
+          rgba(145, 230, 255, 0.08),
+          transparent 45%,
+          rgba(109, 124, 255, 0.08)
+        );
         opacity: 0;
         transition: opacity 0.25s ease;
         pointer-events: none;
@@ -747,8 +756,12 @@
         content: '';
         position: absolute;
         inset: 0;
-        background:
-          linear-gradient(120deg, transparent 0 42%, rgba(145, 230, 255, 0.08) 50%, transparent 58% 100%);
+        background: linear-gradient(
+          120deg,
+          transparent 0 42%,
+          rgba(145, 230, 255, 0.08) 50%,
+          transparent 58% 100%
+        );
         transform: translateX(-60%);
         animation: footerSweep 9s ease-in-out infinite;
         pointer-events: none;
@@ -817,7 +830,9 @@
         align-items: center;
         gap: 10px;
         color: var(--muted);
-        transition: color 0.2s ease, transform 0.2s ease;
+        transition:
+          color 0.2s ease,
+          transform 0.2s ease;
       }
       .footer-list a:hover {
         color: var(--accent);
@@ -979,7 +994,7 @@
     <header class="topbar">
       <div class="container topbar-inner">
         <a class="brand" href="#top">
-          <img src="../resources/1.png" alt="Sam Code logo" />
+          <img src="./1.png" alt="Sam Code logo" />
           <span>Sam Code</span>
         </a>
         <nav class="nav">
@@ -998,8 +1013,9 @@
           </div>
           <h1>Edit smarter, build faster.</h1>
           <p class="lead">
-            Sam Code is a lightweight desktop IDE built with Electron and React. It combines a responsive code editor,
-            file explorer, integrated terminal, and a groundbreaking independent AI agent—all in one focused interface.
+            Sam Code is a lightweight desktop IDE built with Electron and React. It combines a
+            responsive code editor, file explorer, integrated terminal, and a groundbreaking
+            independent AI agent—all in one focused interface.
           </p>
           <div class="actions">
             <a class="btn btn-primary" href="#download">Download Sam Code</a>
@@ -1013,7 +1029,7 @@
               <span class="r"></span><span class="y"></span><span class="g"></span>
             </div>
             <div class="preview-brand">
-              <img src="../resources/1.png" alt="Sam Code logo" /><span>Sam Code</span>
+              <img src="./1.png" alt="Sam Code logo" /><span>Sam Code</span>
             </div>
           </div>
           <div class="preview-body">
@@ -1043,8 +1059,8 @@
       <div class="container">
         <h2>Built for real development</h2>
         <p class="section-lead">
-          A lightweight editor that doesn't sacrifice functionality. File navigation, syntax highlighting,
-          code execution, and developer workflows all in one place.
+          A lightweight editor that doesn't sacrifice functionality. File navigation, syntax
+          highlighting, code execution, and developer workflows all in one place.
         </p>
         <div class="grid">
           <article class="card">
@@ -1079,33 +1095,50 @@
             <h2>Sam</h2>
             <div class="agent-tagline">Your independent AI agent</div>
           </div>
-          <button class="agent-toggle" onclick="document.querySelector('.agent-details').classList.toggle('open'); this.classList.toggle('open');">▼</button>
+          <button
+            class="agent-toggle"
+            onclick="
+              document.querySelector('.agent-details').classList.toggle('open')
+              this.classList.toggle('open')
+            "
+          >
+            ▼
+          </button>
         </div>
 
         <p class="section-lead">
-          Meet Sam—a groundbreaking AI agent built exclusively for Sam Code. Unlike generic copilots,
-          Sam runs with <strong>any API you provide</strong>: OpenRouter, Ollama, Google, or OpenAI.
-          It's not Claude Code. It's not Copilot. It's something entirely new.
+          Meet Sam—a groundbreaking AI agent built exclusively for Sam Code. Unlike generic
+          copilots, Sam runs with <strong>any API you provide</strong>: OpenRouter, Ollama, Google,
+          or OpenAI. It's not Claude Code. It's not Copilot. It's something entirely new.
         </p>
 
         <div class="agent-details">
           <div class="agent-details-content">
             <p>
-              <strong>Complete control over your AI:</strong> Sam works with any LLM provider. You choose the API key, the model, and the cost. No vendor lock-in, no subscriptions tied to the editor.
+              <strong>Complete control over your AI:</strong> Sam works with any LLM provider. You
+              choose the API key, the model, and the cost. No vendor lock-in, no subscriptions tied
+              to the editor.
             </p>
             <p>
-              <strong>Step-by-step command execution:</strong> Rather than proposing 10 operations at once, Sam shows you the first command, waits for your approval, executes it while you watch the terminal, then proposes the next step based on actual output.
+              <strong>Step-by-step command execution:</strong> Rather than proposing 10 operations
+              at once, Sam shows you the first command, waits for your approval, executes it while
+              you watch the terminal, then proposes the next step based on actual output.
             </p>
             <p>
-              <strong>Intelligent error recovery:</strong> When a command fails, Sam analyzes the error message and proposes a corrected version immediately. Capital letter in project name? Sam will suggest the lowercase alternative. Missing dependencies? Sam will propose installing them or finding a workaround.
+              <strong>Intelligent error recovery:</strong> When a command fails, Sam analyzes the
+              error message and proposes a corrected version immediately. Capital letter in project
+              name? Sam will suggest the lowercase alternative. Missing dependencies? Sam will
+              propose installing them or finding a workaround.
             </p>
             <p>
-              <strong>Chat and Agent modes:</strong> Toggle between conversational chat and agentic task execution. Both modes understand your context, your workspace, and your preferences. They work together seamlessly.
+              <strong>Chat and Agent modes:</strong> Toggle between conversational chat and agentic
+              task execution. Both modes understand your context, your workspace, and your
+              preferences. They work together seamlessly.
             </p>
           </div>
         </div>
 
-        <div class="grid" style="margin-top: 28px;">
+        <div class="grid" style="margin-top: 28px">
           <article class="card">
             <div class="icon icon-theme"></div>
             <h3>Flexible backends</h3>
@@ -1114,7 +1147,10 @@
           <article class="card">
             <div class="icon icon-speed"></div>
             <h3>Step-by-step execution</h3>
-            <p>Commands run one at a time with your approval. You see terminal output and decide what's next.</p>
+            <p>
+              Commands run one at a time with your approval. You see terminal output and decide
+              what's next.
+            </p>
           </article>
           <article class="card">
             <div class="icon icon-tools"></div>
@@ -1134,8 +1170,8 @@
       <div class="container">
         <h2>Download for your platform</h2>
         <p class="section-lead">
-          Available for Windows, macOS, and Linux. All builds share the same powerful editor, marketplace,
-          and Sam agent.
+          Available for Windows, macOS, and Linux. All builds share the same powerful editor,
+          marketplace, and Sam agent.
         </p>
         <div class="download-grid">
           <div class="download-card">
@@ -1186,12 +1222,12 @@
       <div class="container footer-shell">
         <div class="footer-branding">
           <div class="footer-brand-row">
-            <img src="../resources/1.png" alt="Sam Code logo" />
+            <img src="./1.png" alt="Sam Code logo" />
             <strong>Sam Code</strong>
           </div>
           <p class="footer-copy">
-            A focused desktop IDE for developers who want a fast editor, integrated terminal, and an agent that works
-            step by step instead of guessing in bulk.
+            A focused desktop IDE for developers who want a fast editor, integrated terminal, and an
+            agent that works step by step instead of guessing in bulk.
           </p>
           <div class="footer-pills" aria-label="Product highlights">
             <span class="footer-pill">Electron + React</span>
@@ -1212,14 +1248,24 @@
         <div class="footer-column">
           <h3>Social</h3>
           <div class="footer-social-links">
-            <a class="social-link" href="https://github.com/Houssemeddine-mag/Sam-Code" target="_blank" rel="noopener">
+            <a
+              class="social-link"
+              href="https://github.com/Houssemeddine-mag/Sam-Code"
+              target="_blank"
+              rel="noopener"
+            >
               <div>
                 <span>GitHub</span>
                 <div><small>Source, releases, and updates</small></div>
               </div>
               <small>↗</small>
             </a>
-            <a class="social-link" href="https://www.instagram.com/m_innovation_freelance/?hl=fr" target="_blank" rel="noopener">
+            <a
+              class="social-link"
+              href="https://www.instagram.com/m_innovation_freelance/?hl=fr"
+              target="_blank"
+              rel="noopener"
+            >
               <div>
                 <span>Instagram</span>
                 <div><small>Behind the scenes and builds</small></div>
@@ -1234,7 +1280,9 @@
             <span class="footer-status-dot"></span>
             <span>Built for real workflows, not just demos.</span>
           </div>
-          <div class="footer-note">Sam Code keeps the agent visible, the terminal honest, and the experience fast.</div>
+          <div class="footer-note">
+            Sam Code keeps the agent visible, the terminal honest, and the experience fast.
+          </div>
         </div>
       </div>
     </footer>
