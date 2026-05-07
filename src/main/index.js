@@ -7,7 +7,7 @@ import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import fs from 'fs/promises'
 import pty from 'node-pty'
-import icon from '../../resources/icon.png?asset'
+import icon from '../../resources/1.png?asset'
 import { registerMarketplaceHandlers, activateInstalledPackages } from './marketplace.js'
 
 const terminalSessions = new Map()
