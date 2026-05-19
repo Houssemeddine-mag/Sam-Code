@@ -53,7 +53,8 @@ function TerminalSession({
   focusSignal,
   pushActivity,
   onExit,
-  onCommandFinished
+  onCommandFinished,
+  pendingCommandToken
 }) {
   const containerRef = useRef(null)
   const terminalRef = useRef(null)
@@ -315,6 +316,13 @@ function TerminalSession({
   }, [resolvedCwd, session.id, session.shell])
 
   useEffect(() => {
+    pendingCommandTokenRef.current = String(pendingCommandToken || '')
+    if (pendingCommandTokenRef.current) {
+      pendingCommandOutputRef.current = ''
+    }
+  }, [pendingCommandToken])
+
+  useEffect(() => {
     if (!initializedRef.current || !sessionIdRef.current || !resolvedCwd) {
       previousCwdRef.current = resolvedCwd
       return undefined
@@ -389,6 +397,7 @@ function TerminalDock({
   const pendingCommandRef = useRef('')
   const pendingCommandSessionRef = useRef('')
   const pendingCommandTokenRef = useRef('')
+  const [pendingCommandToken, setPendingCommandToken] = useState('')
   const [focusSignal, setFocusSignal] = useState(0)
 
   const activeSession = useMemo(
@@ -472,6 +481,7 @@ function TerminalDock({
       const shell = String(activeSession?.shell || defaultShell).toLowerCase()
       const token = `__SAMCODE_DONE__${Date.now()}_${Math.random().toString(16).slice(2)}`
       pendingCommandTokenRef.current = token
+      setPendingCommandToken(token)
 
       // Write the command to the active terminal session
       const wrappedCommand =
@@ -629,6 +639,7 @@ function TerminalDock({
               pushActivity={pushActivity}
               onExit={handleSessionExit}
               onCommandFinished={onCommandFinished}
+              pendingCommandToken={session.id === activeSession?.id ? pendingCommandToken : ''}
             />
           ))
         )}

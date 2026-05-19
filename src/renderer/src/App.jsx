@@ -3,11 +3,26 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import Editor from '@monaco-editor/react'
 import { loader } from '@monaco-editor/react'
 import * as monaco from 'monaco-editor'
+import hljs from 'highlight.js/lib/core'
+import java from 'highlight.js/lib/languages/java'
+import python from 'highlight.js/lib/languages/python'
+import c from 'highlight.js/lib/languages/c'
+import cpp from 'highlight.js/lib/languages/cpp'
+import 'highlight.js/styles/github-dark.css'
+
+hljs.registerLanguage('java', java)
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('c', c)
+hljs.registerLanguage('cpp', cpp)
+
 import {
   Bot,
   Binary,
+  Check,
   ChevronUp,
   ChevronRight,
+  Copy,
+  Edit3,
   FileArchive,
   FileCode,
   FileImage,
@@ -71,6 +86,8 @@ function App() {
   const [activePath, setActivePath] = useState('')
   const [tabs, setTabs] = useState([])
   const [saving, setSaving] = useState(false)
+  const [syntaxChecking, setSyntaxChecking] = useState(false)
+  const [syntaxCheckResult, setSyntaxCheckResult] = useState(null)
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(
     () => localStorage.getItem(STORAGE_KEYS.autoSaveEnabled) === 'true'
   )
@@ -296,6 +313,147 @@ function App() {
       console.error('Failed to register/unregister java helpers', e)
     }
   }, [installedPackages, monaco])
+
+  useEffect(() => {
+    if (!monaco) return
+
+    const disposables = []
+    const languageProviders = [
+      {
+        language: 'python',
+        snippets: [
+          {
+            label: 'def',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: ['def ${1:function_name}(${2:args}):', '\t$0'].join('\n'),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'Python function definition'
+          },
+          {
+            label: 'ifmain',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: ['if __name__ == "__main__":', '\t$0'].join('\n'),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'Python main guard'
+          },
+          {
+            label: 'for',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: ['for ${1:item} in ${2:iterable}:', '\t$0'].join('\n'),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'Python for-loop'
+          }
+        ]
+      },
+      {
+        language: 'c',
+        snippets: [
+          {
+            label: 'main',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: [
+              '#include <stdio.h>',
+              '',
+              'int main(void) {',
+              '\t$0',
+              '\treturn 0;',
+              '}'
+            ].join('\n'),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'C main function'
+          },
+          {
+            label: 'printf',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: 'printf("%s\\n", ${1:message});',
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'C printf statement'
+          }
+        ]
+      },
+      {
+        language: 'cpp',
+        snippets: [
+          {
+            label: 'main',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: [
+              '#include <iostream>',
+              '',
+              'int main() {',
+              '\tstd::cout << ${1:message} << std::endl;',
+              '\treturn 0;',
+              '}'
+            ].join('\n'),
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'C++ main function'
+          },
+          {
+            label: 'cout',
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText: 'std::cout << ${1:value} << std::endl;',
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            documentation: 'C++ output statement'
+          }
+        ]
+      }
+    ]
+
+    for (const provider of languageProviders) {
+      disposables.push(
+        monaco.languages.registerCompletionItemProvider(provider.language, {
+          provideCompletionItems: () => ({ suggestions: provider.snippets })
+        })
+      )
+    }
+
+    disposables.push(
+      monaco.languages.registerCompletionItemProvider('html', {
+        triggerCharacters: ['!'],
+        provideCompletionItems: (model, position) => {
+          const lineContent = model
+            .getLineContent(position.lineNumber)
+            .substring(0, position.column - 1)
+          if (lineContent.trim() !== '!') {
+            return { suggestions: [] }
+          }
+
+          return {
+            suggestions: [
+              {
+                label: '! html5',
+                kind: monaco.languages.CompletionItemKind.Snippet,
+                insertText: [
+                  '<!DOCTYPE html>',
+                  '<html lang="en">',
+                  '<head>',
+                  '    <meta charset="UTF-8" />',
+                  '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+                  '    <title>${1:Document}</title>',
+                  '</head>',
+                  '<body>',
+                  '    $0',
+                  '</body>',
+                  '</html>'
+                ].join('\n'),
+                insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                documentation: 'HTML5 skeleton'
+              }
+            ]
+          }
+        }
+      })
+    )
+
+    return () => {
+      for (const d of disposables) {
+        try {
+          d.dispose()
+        } catch {}
+      }
+    }
+  }, [monaco])
+
   const [activeMenuIndex, setActiveMenuIndex] = useState(null)
   const [runningNotebookCellIndex, setRunningNotebookCellIndex] = useState(null)
   const [selectedFolder, setSelectedFolder] = useState('')
@@ -309,6 +467,7 @@ function App() {
   const [, setShowRenameModal] = useState(false)
   const [renameTarget, setRenameTarget] = useState('')
   const [renameNewName, setRenameNewName] = useState('')
+  const [newlyCreatedPath, setNewlyCreatedPath] = useState('')
   const [rateLimitedUntil, setRateLimitedUntil] = useState(0)
   const [status, setStatus] = useState('')
   const [toasts, setToasts] = useState([])
@@ -341,6 +500,22 @@ function App() {
       pendingTerminalResolveRef.current = null
     }
   }, [])
+
+  const handleCopyMessage = async (content) => {
+    try {
+      await navigator.clipboard.writeText(String(content || ''))
+      pushActivity('success', 'Message copied to clipboard.')
+    } catch (error) {
+      pushActivity('error', 'Copy failed: ' + String(error?.message || error))
+    }
+  }
+
+  const handleEditMessage = (content) => {
+    setInput(String(content || ''))
+    if (editorMainRef.current) {
+      editorMainRef.current.focus()
+    }
+  }
 
   const layoutMetricsRef = useRef({ sidebarWidth: 280, rightWidth: 360, terminalHeight: 320 })
   const notebookCellRefs = useRef([])
@@ -384,8 +559,9 @@ function App() {
 
     const text = String(responseText).trim()
 
-    // Try to extract JSON from code blocks (```json ... ```)
-    const jsonBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    // Try to extract JSON from code blocks ( ... )
+    const jsonBlockMatch =
+      text.match(/\`\`\`json\s*([\s\S]*?)```/i) || text.match(/```(?:json)?\s*([\s\S]*?)```/i)
     let jsonStr = jsonBlockMatch ? jsonBlockMatch[1].trim() : text
 
     // Try to find JSON object that starts with { and ends with }
@@ -404,7 +580,222 @@ function App() {
         summary
       }
     } catch (e) {
+      console.error(
+        'Agent payload extraction failed. Input:',
+        responseText,
+        '\\nParsed Str:',
+        jsonStr,
+        '\\nError:',
+        e
+      )
       return null
+    }
+  }
+
+  const safeExtractJson = (text) => {
+    if (!text) return null
+    const candidate = String(text)
+      .replace(/(?:json)?\s*([\s\S]*?)/g, '$1')
+      .trim()
+    const jsonMatch = candidate.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return null
+    try {
+      return JSON.parse(jsonMatch[0])
+    } catch {
+      return null
+    }
+  }
+
+  const sendModelChatRequest = async ({ systemPrompt, userPrompt, maxTokens = 400 }) => {
+    if (!selectedModel || !apiKey) {
+      throw new Error('API key and model are required for syntax analysis.')
+    }
+
+    const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
+    const requestBody = {
+      model: selectedModel,
+      messages: [
+        { role: 'system', content: String(systemPrompt || '') },
+        { role: 'user', content: String(userPrompt || '') }
+      ],
+      max_tokens: maxTokens
+    }
+
+    if (effectiveProvider === 'ollama') {
+      const base = normalizeEndpointOrigin(apiKey, 'http:')
+      const resp = await fetch(`${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: requestBody.messages,
+          stream: false
+        })
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        throw new Error(`Ollama returned ${resp.status}: ${text}`)
+      }
+      const completion = await resp.json()
+      return (
+        completion?.message?.content ??
+        completion?.response ??
+        completion?.choices?.[0]?.message?.content ??
+        ''
+      )
+    }
+
+    if (effectiveProvider === 'google') {
+      const key = String(apiKey || '').trim()
+      const url = /^https?:\/\//i.test(key)
+        ? key
+        : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(key)}`
+      const contents = requestBody.messages.map((message) => ({
+        role: message.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: String(message.content || '') }]
+      }))
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents,
+          systemInstruction: { parts: [{ text: String(systemPrompt || '') }] }
+        })
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        throw new Error(`Google returned ${resp.status}: ${text}`)
+      }
+      const completion = await resp.json()
+      return (
+        completion?.candidates?.[0]?.content?.parts?.map((part) => part?.text || '').join('') || ''
+      )
+    }
+
+    const endpoint =
+      effectiveProvider === 'openai'
+        ? 'https://api.openai.com/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions'
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    }
+    if (effectiveProvider === 'openrouter') {
+      headers['HTTP-Referer'] = 'http://localhost'
+      headers['X-Title'] = 'Sam Code'
+    }
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody)
+    })
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      throw new Error(`${effectiveProvider} returned ${resp.status}: ${text}`)
+    }
+    const completion = await resp.json()
+    return completion?.choices?.[0]?.message?.content ?? ''
+  }
+
+  const analyzeSyntaxWithModel = async (sourceCode, language) => {
+    const systemPrompt = `You are a syntax analysis assistant for ${language}. Identify any syntax errors in the code and provide a corrected version if possible. Respond only with valid JSON.`
+    const userPrompt = `Analyze the following ${language} code for syntax errors and return a JSON object with keys: errors (array of {line, message}), suggestion, fixedCode. If there are no issues, return {"errors": [], "suggestion": "No syntax errors found.", "fixedCode": ""}.
+
+\`\`\`${language}\n${sourceCode}\n\`\`\``
+
+    const responseText = await sendModelChatRequest({
+      systemPrompt,
+      userPrompt,
+      maxTokens: 400
+    })
+
+    const parsed = safeExtractJson(responseText)
+    if (!parsed) {
+      return {
+        errors: [],
+        suggestion: 'Model responded but JSON parsing failed. Review the output manually.',
+        fixedCode: '',
+        rawOutput: responseText
+      }
+    }
+
+    return {
+      errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+      suggestion: String(parsed.suggestion || '').trim(),
+      fixedCode: String(parsed.fixedCode || '').trim(),
+      rawOutput: responseText
+    }
+  }
+
+  const renderCodeHtml = (codeText, lang = 'text') => {
+    const raw = String(codeText || '')
+    const highlighted = hljs.getLanguage(lang)
+      ? hljs.highlight(raw, { language: lang }).value
+      : hljs.highlightAuto(raw, ['java', 'python', 'c', 'cpp']).value
+    return `<pre class="rounded-xl bg-slate-950 p-3 text-sm overflow-x-auto"><code class="hljs language-${escapeHtml(lang)}">${highlighted}</code></pre>`
+  }
+
+  const renderMarkdownMessage = (content) => {
+    if (!content) return ''
+    let html = escapeHtml(content)
+
+    html = html.replace(/(\w+)?\n([\s\S]*?)/g, (match, lang = 'plaintext', code) => {
+      const language = String(lang || 'plaintext').toLowerCase()
+      const highlighted = hljs.getLanguage(language)
+        ? hljs.highlight(code, { language }).value
+        : hljs.highlightAuto(code, ['java', 'python', 'c', 'cpp']).value
+      return `<pre class="rounded-xl bg-slate-950 p-3 overflow-x-auto"><code class="hljs language-${escapeHtml(language)}">${highlighted}</code></pre>`
+    })
+
+    html = html.replace(
+      /`([^`]+)`/g,
+      '<code class="inline-code rounded bg-white/10 px-1 text-xs text-cyan-100">$1</code>'
+    )
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    html = html.replace(/\n/g, '<br/>')
+    return html
+  }
+
+  const runSyntaxCheck = async () => {
+    if (!activePath || !editorMainRef.current) {
+      return
+    }
+    const language = activeLanguage
+    if (!['java', 'python', 'c', 'cpp'].includes(language)) {
+      pushActivity(
+        'warning',
+        'Syntax checking is supported only for Java, Python, C, and C++ files.'
+      )
+      return
+    }
+
+    setSyntaxChecking(true)
+    setSyntaxCheckResult(null)
+    try {
+      const currentCode = editorMainRef.current.getValue()
+      const result = await analyzeSyntaxWithModel(currentCode, language)
+      const payload = { language, ...result }
+      setSyntaxCheckResult(payload)
+      if (result.errors.length === 0) {
+        pushActivity('success', 'No syntax errors detected.')
+      } else {
+        pushActivity('warning', 'Syntax errors detected. Review the file for errors.')
+      }
+    } catch (error) {
+      const message = String(error?.message || error)
+      pushActivity('error', `Syntax check failed: ${message}`)
+      const payload = {
+        language,
+        errors: [],
+        suggestion: `Failed to analyze syntax: ${message}`,
+        fixedCode: '',
+        rawOutput: ''
+      }
+      setSyntaxCheckResult(payload)
+    } finally {
+      setSyntaxChecking(false)
     }
   }
 
@@ -1645,11 +2036,162 @@ function App() {
     if (lower.endsWith('.ts') || lower.endsWith('.tsx')) return 'typescript'
     if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs'))
       return 'javascript'
+    if (lower.endsWith('.py')) return 'python'
+    if (lower.endsWith('.java')) return 'java'
+    if (lower.endsWith('.c')) return 'c'
+    if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx')) return 'cpp'
     if (lower.endsWith('.css')) return 'css'
     if (lower.endsWith('.html')) return 'html'
     if (lower.endsWith('.json')) return 'json'
     if (lower.endsWith('.md')) return 'markdown'
     return 'plaintext'
+  }
+
+  const getFileTemplateContent = (filePath) => {
+    const fileName = basenameFromPath(filePath)
+    const baseName = fileName.replace(/\.[^.]+$/, '')
+    const lower = filePath.toLowerCase()
+
+    if (lower.endsWith('.java')) {
+      return `public class ${baseName} {
+    public static void main(String[] args) {
+        System.out.println("Hello, world!");
+    }
+}
+`
+    }
+
+    if (lower.endsWith('.py')) {
+      return `def main():
+    print("Hello, world!")
+
+
+if __name__ == "__main__":
+    main()
+`
+    }
+
+    if (lower.endsWith('.c')) {
+      return `#include <stdio.h>
+
+int main(void) {
+    printf("Hello, world!\n");
+    return 0;
+}
+`
+    }
+
+    if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx')) {
+      return `#include <iostream>
+
+int main() {
+    std::cout << "Hello, world!" << std::endl;
+    return 0;
+}
+`
+    }
+
+    if (lower.endsWith('.js')) {
+      return `function main() {
+    console.log("Hello, world!")
+}
+
+main()
+`
+    }
+
+    if (lower.endsWith('.ts')) {
+      return `function main(): void {
+    console.log("Hello, world!")
+}
+
+main()
+`
+    }
+
+    if (lower.endsWith('.html')) {
+      return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${baseName || 'Document'}</title>
+</head>
+<body>
+    <h1>Welcome to ${baseName || 'your page'}</h1>
+</body>
+</html>
+`
+    }
+
+    if (lower.endsWith('.css')) {
+      return `/* Styles for ${fileName} */
+body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+}
+`
+    }
+
+    if (lower.endsWith('.json')) {
+      return `{
+    "name": "${baseName || 'project'}"
+}
+`
+    }
+
+    if (lower.endsWith('.ipynb')) {
+      return JSON.stringify(
+        {
+          cells: [
+            {
+              cell_type: 'code',
+              metadata: { language: 'python' },
+              source: ['print("Hello, world!")\n'],
+              execution_count: null,
+              outputs: []
+            }
+          ],
+          metadata: {
+            kernelspec: {
+              display_name: 'Python',
+              language: 'python',
+              name: 'python3'
+            },
+            language_info: {
+              name: 'python'
+            }
+          },
+          nbformat: 4,
+          nbformat_minor: 5
+        },
+        null,
+        2
+      )
+    }
+
+    if (lower.endsWith('.md')) {
+      return `# ${baseName || 'Document'}
+
+Write your markdown here.
+`
+    }
+
+    if (lower.endsWith('.sh')) {
+      return `#!/bin/bash
+set -e
+
+# Script generated for ${fileName}
+`
+    }
+
+    if (lower.endsWith('.bat')) {
+      return `@echo off
+rem Script generated for ${fileName}
+`
+    }
+
+    return ''
   }
 
   const iconForPath = (item, isOpen = false) => {
@@ -1689,6 +2231,11 @@ function App() {
     if (/\.(js|jsx|mjs|cjs)$/.test(lower)) return { iconColor: 'text-yellow-500', badge: 'JS' }
     if (/\.ts$/.test(lower)) return { iconColor: 'text-blue-600', badge: 'TS' }
     if (/\.tsx?$/.test(lower)) return { iconColor: 'text-blue-600', badge: 'TSX' }
+
+    // C / C++
+    if (/\.c$/.test(lower)) return { iconColor: 'text-sky-500', badge: 'C' }
+    if (/\.cpp$/.test(lower) || /\.cc$/.test(lower) || /\.cxx$/.test(lower))
+      return { iconColor: 'text-sky-500', badge: 'CPP' }
 
     // Python
     if (/\.py$/.test(lower)) return { iconColor: 'text-blue-500', badge: 'PY' }
@@ -2073,12 +2620,16 @@ function App() {
     setShowRenameModal(false)
     setMenuForPath('')
     setContextMenu(null)
+    if (path !== newlyCreatedPath) {
+      setNewlyCreatedPath('')
+    }
   }
 
   const cancelRename = () => {
     setShowRenameModal(false)
     setRenameTarget('')
     setRenameNewName('')
+    setNewlyCreatedPath('')
   }
 
   const confirmRename = async () => {
@@ -2100,6 +2651,18 @@ function App() {
           ? await window.api.renamePath(renameTarget, newPath)
           : await window.electron.ipcRenderer.invoke('fs:rename', renameTarget, newPath)
       if (ok) {
+        if (renameTarget === newlyCreatedPath) {
+          const template = getFileTemplateContent(newPath)
+          if (template) {
+            await window.api.saveFile(newPath, template)
+            if (activePath === newPath || activePath === renameTarget) {
+              codeRef.current = template
+              setCode(template)
+            }
+          }
+          setNewlyCreatedPath('')
+        }
+
         pushActivity('success', `Renamed to ${newPath}`)
         setTabs((currentTabs) =>
           currentTabs.map((tab) =>
@@ -2155,6 +2718,7 @@ function App() {
         // Start rename immediately
         setRenameTarget(fullPath)
         setRenameNewName('new_file')
+        setNewlyCreatedPath(fullPath)
       } else {
         pushActivity('error', `Failed to create file`)
       }
@@ -2987,19 +3551,30 @@ function App() {
     }
   }
 
-  const buildCommandResultMessage = (operation, result) => {
-    const stdout = String(result?.stdout || '').trim()
-    const stderr = String(result?.stderr || '').trim()
-    const code = result?.code
+  const normalizeTerminalOutput = (text) => {
+    return String(text || '')
+      .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+      .replace(/\r/g, '')
+      .replace(/^\s+|\s+$/g, '')
+  }
 
-    return [
-      `Executed: ${describeAgentOperation(operation)}`,
-      `Exit code: ${code}`,
-      stdout ? `Stdout:\n${stdout}` : '',
-      stderr ? `Stderr:\n${stderr}` : ''
-    ]
-      .filter(Boolean)
-      .join('\n')
+  const buildCommandResultMessage = (operation, result) => {
+    const stdout = normalizeTerminalOutput(result?.stdout)
+    const stderr = normalizeTerminalOutput(result?.stderr)
+    const code = Number(result?.code ?? 0)
+    const lines = [`Command executed: ${describeAgentOperation(operation)}`, `Exit code: ${code}`]
+
+    if (stdout) {
+      lines.push(`Output:\n${stdout}`)
+    }
+    if (stderr) {
+      lines.push(`Error output:\n${stderr}`)
+    }
+    if (!stdout && !stderr) {
+      lines.push('No output was produced.')
+    }
+
+    return lines.filter(Boolean).join('\n')
   }
 
   const buildAgentResultMessage = (payload, result) => {
@@ -3042,14 +3617,14 @@ function App() {
           .join('\n\n')
       : ''
 
-    const summaryLine = payload.summary || 'Workspace operations executed.'
+    const summaryLine = payload.summary || 'The requested workspace updates have been completed.'
     return [
       summaryLine,
-      `Applied: ${appliedCount}`,
-      `Failed: ${failedCount}`,
+      `Files changed: ${appliedCount}`,
+      `Failures: ${failedCount}`,
       appliedList ? `\nChanged files:\n${appliedList}` : '',
       failedList ? `\nFailed operations:\n${failedList}` : '',
-      commandOutput ? `\nCommand output:\n${commandOutput}` : ''
+      commandOutput ? `\nTerminal output:\n${commandOutput}` : ''
     ]
       .filter(Boolean)
       .join('\n')
@@ -3155,15 +3730,10 @@ function App() {
 
         const terminalResult = await waitForTerminalResult()
         const exitCode = Number(terminalResult?.exitCode || 0)
-        const stdout = String(terminalResult?.output || '').trim()
+        const stdout = normalizeTerminalOutput(terminalResult?.output)
         const commandResult = { code: exitCode, stdout, stderr: '' }
         const completionMessage = buildCommandResultMessage(operation, commandResult)
         commandMessages.push(completionMessage)
-
-        setMessages((current) => [
-          ...current,
-          { role: 'assistant', kind: 'command', content: completionMessage }
-        ])
 
         if (exitCode !== 0) {
           pushActivity('warning', `Terminal command finished with code ${exitCode}.`)
@@ -3271,13 +3841,152 @@ function App() {
     return buildAgentResultMessage(payload, result)
   }
 
+  const executeApprovedAgentOperationsSequential = async (payload) => {
+    const agentWorkspaceRoot = getAgentWorkspaceScope()
+    if (!agentWorkspaceRoot) {
+      throw new Error('Select a folder in the Explorer before the agent can apply file operations.')
+    }
+
+    const operations = Array.isArray(payload?.operations) ? payload.operations : []
+    if (!operations.length) {
+      return payload.summary || 'No workspace changes were needed.'
+    }
+
+    const isExecuteAction = (operation) =>
+      String(operation?.action || '').toLowerCase() === 'execute'
+
+    const applyFileOperations = async (fileOperations) => {
+      if (!fileOperations.length) return null
+      const result = await window.api.applyAgentOperations({
+        rootFolder: agentWorkspaceRoot,
+        operations: fileOperations
+      })
+
+      const appliedCount = Array.isArray(result?.applied) ? result.applied.length : 0
+      const failedCount = Array.isArray(result?.failed) ? result?.failed.length : 0
+
+      if (agentWorkspaceRoot) {
+        await loadDirectory(agentWorkspaceRoot)
+      }
+
+      if (activePath) {
+        const activeFileWasDeleted = Array.isArray(result?.applied)
+          ? result.applied.some(
+              (operation) =>
+                operation?.action === 'delete' &&
+                String(operation?.path || '').toLowerCase() === activePath.toLowerCase()
+            )
+          : false
+
+        if (activeFileWasDeleted) {
+          setActivePath('')
+          setCode('// Active file was deleted by agent operation.')
+          setTabs((current) => current.filter((tab) => tab.path !== activePath))
+        } else {
+          await openFile(activePath)
+        }
+      }
+
+      if (failedCount > 0) {
+        setStatus(`Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+        pushActivity('warning', `Agent applied ${appliedCount} change(s), ${failedCount} failed.`)
+      } else {
+        setStatus(`Agent applied ${appliedCount} change(s).`)
+        pushActivity('success', `Agent applied ${appliedCount} change(s) to the workspace.`)
+      }
+
+      return result
+    }
+
+    const waitForTerminalResult = () =>
+      new Promise((resolve) => {
+        const timeoutId = window.setTimeout(() => {
+          if (pendingTerminalResolveRef.current === resolver) {
+            pendingTerminalResolveRef.current = null
+            resolve({
+              exitCode: 124,
+              output: 'Timed out waiting for terminal completion marker.'
+            })
+          }
+        }, 180000)
+
+        const resolver = (result) => {
+          window.clearTimeout(timeoutId)
+          resolve(result)
+        }
+
+        pendingTerminalResolveRef.current = resolver
+      })
+
+    const commandMessages = []
+    const fileResultMessages = []
+    let pendingFileOperations = []
+
+    const flushPendingFiles = async () => {
+      if (!pendingFileOperations.length) return
+      const fileOps = [...pendingFileOperations]
+      pendingFileOperations = []
+      const result = await applyFileOperations(fileOps)
+      if (result) {
+        fileResultMessages.push(
+          buildAgentResultMessage({ summary: 'Applied pending file changes.' }, result)
+        )
+      }
+    }
+
+    for (let index = 0; index < operations.length; index += 1) {
+      const operation = operations[index]
+      if (!isExecuteAction(operation)) {
+        pendingFileOperations.push(operation)
+        continue
+      }
+
+      await flushPendingFiles()
+
+      const command = String(operation?.command || '').trim()
+      if (!command) {
+        throw new Error('Execute action requires a command.')
+      }
+
+      setTerminalCommand(command)
+      setTerminalOpen(true)
+      setStatus(`Running agent command ${index + 1}/${operations.length}...`)
+      pushActivity('info', `Agent executed command in terminal: ${command}`)
+
+      const terminalResult = await waitForTerminalResult()
+      const exitCode = Number(terminalResult?.exitCode || 0)
+      const stdout = String(terminalResult?.output || '').trim()
+      const commandResult = { code: exitCode, stdout, stderr: '' }
+      const completionMessage = buildCommandResultMessage(operation, commandResult)
+      commandMessages.push(completionMessage)
+
+      // Command output will be included in the final summary message instead of emitting a separate chat entry.
+
+      if (exitCode !== 0) {
+        pushActivity('warning', `Terminal command finished with code ${exitCode}.`)
+      } else {
+        pushActivity('success', `Terminal command finished with code ${exitCode}.`)
+      }
+    }
+
+    await flushPendingFiles()
+
+    return [
+      payload.summary || 'Agent completed approved operations.',
+      ...fileResultMessages,
+      ...commandMessages
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+  }
+
   const approvePendingAgentProposal = async () => {
     if (!pendingAgentProposal || approvalBusy) return
 
     setApprovalBusy(true)
     pushActivity('info', 'Approved agent proposal. Executing requested workspace changes.')
     try {
-      const resultMessage = await executeApprovedAgentOperations(pendingAgentProposal)
+      const resultMessage = await executeApprovedAgentOperationsSequential(pendingAgentProposal)
       setMessages((current) => [
         ...current,
         {
@@ -3382,32 +4091,20 @@ WORKSPACE CONTEXT:
 - Shell: PowerShell (Windows)
 
     IMPORTANT: Do not run project scaffolding, installs, or file changes in the workspace root unless the selected folder is the workspace root. Use the agent scope folder as cwd and as the base for relative paths.
+    Use PowerShell-native commands whenever possible. For example, use Get-ChildItem -Force or dir instead of ls -la on Windows PowerShell.
+    Keep your language professional, clear, and user-friendly. Avoid repeating terminal command wrappers, raw ANSI sequences, or low-level shell noise in the final user-facing response.
 
 YOUR AUTONOMOUS OPERATING LOOP - ALWAYS FOLLOW THIS PATTERN:
 
-[STEP 1] UNDERSTAND: Read the user's request carefully. Ask yourself: what is the end goal? What files need to change? What commands need to run?
+[STEP 1] THINK: Analyze the user request and the workspace context. What is missing? What are the dependencies? What files and commands are required?
 
-[STEP 2] PLAN: Before proposing operations, NARRATE your plan to the user with [STEP N/M] prefixes:
-- [STEP 1/N]: "First, I'll inspect the project structure..."
-- [STEP 2/N]: "Then, I'll install the required dependencies..."
-- [STEP 3/N]: "Finally, I'll create the component file..."
-Show the user your complete thinking and which commands will be executed in what order.
+[STEP 2] PLAN: Formulate a multi-step strategy and narrate it with [STEP N/M] prefixes before doing anything. Do not write or execute complex changes until the plan is clear.
 
-[STEP 3] ACT: Propose ALL operations in ONE JSON block with clear narration:
-- Include [STEP N/M] prefixes in the summary explaining what each operation does
-- Combine setup commands, file operations, and build commands in optimal order
-- Use relative paths under the workspace folder
-- Keep every command cwd inside the agent scope folder
+[STEP 3] ACT: Execute the plan in a single coherent set of operations. Use relative paths, the selected folder scope, and only proceed after the strategy is complete.
 
-[STEP 4] VALIDATE: When a command fails (non-zero exit code):
-- Analyze the stderr output immediately
-- Identify the error type: missing module, port conflict, permission denied, command not found, syntax error, etc.
-- DO NOT wait for user approval - autonomously propose and execute the fix
-- Retry the same or corrected command without asking
+[STEP 4] OBSERVE: Inspect the result of each action. If a command fails, analyze the error output, fix the root cause, and retry. Do not move on until the result is validated.
 
-[STEP 5] ITERATE: If the retry still fails, analyze the NEW error and propose the next fix. Continue until success.
-- Only pause for genuine blockers (user input required, network down, etc.)
-- Never repeat the exact same failing command twice
+[STEP 5] ITERATE: Repeat THINK ➔ PLAN ➔ ACT ➔ OBSERVE for every user request. If an operation still fails, diagnose the new failure and continue until success or a genuine blocker is reached.
 
 ERROR RECOVERY PATTERNS YOU KNOW:
 - "ModuleNotFoundError" or "Cannot find module": Run npm install or pip install to get missing dependency
@@ -3420,7 +4117,9 @@ ERROR RECOVERY PATTERNS YOU KNOW:
 - "Timeout": Increase timeout value, check network, or retry operation
 
 RESPONSE FORMAT - JSON ONLY:
-When you have a plan and operations ready, respond ONLY with a JSON block containing:
+When you have a plan and operations ready, respond ONLY with a single JSON object. If you cannot complete the request, still output valid JSON with an empty operations array and a summary explaining why. Do not include any additional commentary outside the JSON object. Use only keys: summary and operations.
+
+The JSON object must exactly follow this structure:
 {
   "summary": "[STEP N/M] Description of what this accomplishes",
   "operations": [
@@ -3442,6 +4141,10 @@ KEY RULES:
 8. Keep operations sequential and logical - install before use, create before modify, test after build
 9. Use platform-aware commands (PowerShell on Windows, bash on Unix)
 10. Include helpful context: "Installing 5 packages...", "Creating React component...", etc.
+11. NEVER try to output large built-in boilerplates (like a full React template) manually. ALWAYS use standard CLI scaffolding tools (e.g.
+pm create vite@latest --yes,
+px create-react-app --yes).
+12. NEVER output commands that prompt for interactive user input. ALWAYS use --yes, --force, or equivalent flags.
 
 EXAMPLES OF GOOD AUTONOMOUS RESPONSES:
 
@@ -3494,48 +4197,91 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
       const requestBody = {
         model: selectedModel,
         messages: [{ role: 'system', content: systemPrompt }, ...nextMessages],
-        max_tokens: mode === 'agent' ? 2048 : 512
+        max_tokens: Math.min(4096, mode === 'agent' ? 4096 : 2048),
+        stream: true
       }
 
       let responseText = ''
+      const streamMessageId = 'stream_' + Date.now()
+
+      if (mode !== 'agent') {
+        setStatus('Thinking...')
+        setMessages((current) => [
+          ...current,
+          { id: streamMessageId, role: 'assistant', kind: 'chat', content: '' }
+        ])
+      }
+
+      const appendChunk = (text) => {
+        responseText += text
+        if (mode !== 'agent') {
+          setMessages((current) =>
+            current.map((m) => (m.id === streamMessageId ? { ...m, content: responseText } : m))
+          )
+        }
+      }
+
+      async function processSSE(response, onChunk) {
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop()
+          for (let line of lines) {
+            line = line.trim()
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6)
+              if (data === '[DONE]') continue
+              try {
+                const parsed = JSON.parse(data)
+                // OpeaAI / OpenRouter / Google SSE extraction
+                const chunk =
+                  parsed?.choices?.[0]?.delta?.content ??
+                  parsed?.candidates?.[0]?.content?.parts?.[0]?.text ??
+                  ''
+                if (chunk) onChunk(chunk)
+              } catch (e) {}
+            } else if (line.startsWith('{')) {
+              try {
+                const parsed = JSON.parse(line)
+                const chunk = parsed?.message?.content ?? parsed?.response ?? ''
+                if (chunk) onChunk(chunk)
+              } catch (e) {}
+            }
+          }
+        }
+      }
+
       if (effectiveProvider === 'ollama') {
         const base = normalizeEndpointOrigin(apiKey, 'http:')
         const resp = await fetch(`${base}/api/chat`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: selectedModel,
             messages: [{ role: 'system', content: systemPrompt }, ...nextMessages],
-            stream: false
+            stream: true
           }),
           signal: controller.signal
         })
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => '')
-          throw new Error(`Ollama returned ${resp.status}: ${text}`)
-        }
-        const completion = await resp.json()
-        responseText =
-          completion?.message?.content ??
-          completion?.response ??
-          completion?.choices?.[0]?.message?.content ??
-          ''
+        if (!resp.ok) throw new Error(`Ollama returned ${resp.status}`)
+        await processSSE(resp, appendChunk)
       } else if (effectiveProvider === 'google') {
         const key = String(apiKey || '').trim()
         const url = /^https?:\/\//i.test(key)
           ? key
-          : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(key)}`
+          : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:streamGenerateContent?key=${encodeURIComponent(key)}&alt=sse`
         const contents = nextMessages.map((message) => ({
           role: message.role === 'assistant' ? 'model' : 'user',
           parts: [{ text: String(message.content || '') }]
         }))
         const resp = await fetch(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents,
             systemInstruction: { parts: [{ text: systemPrompt }] }
@@ -3546,10 +4292,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
           const text = await resp.text().catch(() => '')
           throw new Error(`Google returned ${resp.status}: ${text}`)
         }
-        const completion = await resp.json()
-        responseText =
-          completion?.candidates?.[0]?.content?.parts?.map((part) => part?.text || '').join('') ||
-          ''
+        await processSSE(resp, appendChunk)
       } else {
         const endpoint =
           effectiveProvider === 'openai'
@@ -3573,8 +4316,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
           const text = await resp.text().catch(() => '')
           throw new Error(`${effectiveProvider} returned ${resp.status}: ${text}`)
         }
-        const completion = await resp.json()
-        responseText = completion?.choices?.[0]?.message?.content ?? ''
+        await processSSE(resp, appendChunk)
       }
 
       pushActivity('success', 'AI response received.')
@@ -3620,7 +4362,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
             setPendingAgentProposal(null)
             setPendingAgentStepIndex(0)
             try {
-              const fileResultMessage = await executeApprovedAgentOperations(payload)
+              const fileResultMessage = await executeApprovedAgentOperationsSequential(payload)
               setMessages((current) => [
                 ...current,
                 { role: 'assistant', kind: 'chat', content: fileResultMessage }
@@ -4234,7 +4976,16 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                     </button>
                   </div>
                 </div>
-                <div className="samcode-scrollbar min-h-0 flex-1 overflow-auto py-2">
+                <div
+                  className="samcode-scrollbar min-h-0 flex-1 overflow-auto py-2"
+                  onClick={(event) => {
+                    if (event.target === event.currentTarget && rootFolder) {
+                      setSelectedFolder(rootFolder)
+                      setSelectedExplorerPath(rootFolder)
+                      setSelectedPaths(new Set())
+                    }
+                  }}
+                >
                   {rootFolder ? (
                     <div>
                       <div className="px-4 pb-2 text-[11px] uppercase tracking-[0.25em] text-gray-500">
@@ -4267,7 +5018,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
           )}
 
           <main
-            className={`flex min-w-0 flex-1 flex-col ${showAgentPanel ? 'border-r' : ''} ${appearanceMode === 'light' ? 'border-gray-200 bg-[#f8fafc]' : 'border-black bg-[#1e1e1e]'}`}
+            className={`relative flex min-w-0 flex-1 flex-col ${showAgentPanel ? 'border-r' : ''} ${appearanceMode === 'light' ? 'border-gray-200 bg-[#f8fafc]' : 'border-black bg-[#1e1e1e]'}`}
           >
             {tabs.length > 0 && (
               <div className="flex items-center gap-1 overflow-x-auto border-b border-black bg-[#2d2d2d] px-2 py-1">
@@ -4473,7 +5224,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                     </div>
                   )}
 
-                  <div className="relative min-h-0 flex-1 overflow-auto p-4">
+                  <div className="relative min-h-0 flex-1 overflow-hidden p-4">
                     {activeIsNotebook ? (
                       (() => {
                         try {
@@ -4698,34 +5449,59 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                       })()
                     ) : (
                       <>
-                        {activePath && activePath.toLowerCase().endsWith('.java') && (
-                          <div className="bg-[#1e1e1e] border-b border-white/10 px-4 py-2 flex gap-2">
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  if (editorMainRef.current && editorMainRef.current.getAction) {
-                                    await editorMainRef.current
-                                      .getAction('editor.action.formatDocument')
-                                      .run()
-                                    setStatus('Formatted Java file')
-                                    pushActivity('success', 'Formatted Java file')
+                        {['java', 'python', 'c', 'cpp'].includes(activeLanguage) && (
+                          <div className="bg-[#1e1e1e] border-b border-white/10 px-4 py-2 flex flex-wrap gap-2">
+                            {activePath && activePath.toLowerCase().endsWith('.java') && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    if (editorMainRef.current && editorMainRef.current.getAction) {
+                                      await editorMainRef.current
+                                        .getAction('editor.action.formatDocument')
+                                        .run()
+                                      setStatus('Formatted Java file')
+                                      pushActivity('success', 'Formatted Java file')
+                                    }
+                                  } catch (e) {
+                                    console.error('Format failed', e)
+                                    pushActivity('error', 'Format failed: ' + (e?.message || e))
                                   }
-                                } catch (e) {
-                                  console.error('Format failed', e)
-                                  pushActivity('error', 'Format failed: ' + (e?.message || e))
-                                }
-                              }}
-                              className="rounded px-2 py-1 text-xs font-semibold text-gray-300 bg-[#2d2d2d] hover:bg-[#3c3c3c] hover:text-white transition-colors"
-                            >
-                              Format
-                            </button>
+                                }}
+                                className="rounded px-2 py-1 text-xs font-semibold text-gray-300 bg-[#2d2d2d] hover:bg-[#3c3c3c] hover:text-white transition-colors"
+                              >
+                                Format
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={runCurrentFile}
                               className="rounded px-2 py-1 text-xs font-semibold text-gray-300 bg-[#2d2d2d] hover:bg-[#3c3c3c] hover:text-white transition-colors"
                             >
                               Run
+                            </button>
+                            <button
+                              type="button"
+                              onClick={runSyntaxCheck}
+                              disabled={syntaxChecking}
+                              className={`rounded px-2 py-1 text-xs font-semibold transition-colors ${
+                                syntaxChecking
+                                  ? 'bg-[#2d2d2d] text-gray-300 cursor-not-allowed opacity-60'
+                                  : syntaxCheckResult?.errors?.length === 0
+                                    ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                                    : 'bg-[#2d2d2d] text-gray-300 hover:bg-[#3c3c3c] hover:text-white'
+                              }`}
+                            >
+                              {syntaxChecking ? (
+                                'Checking...'
+                              ) : syntaxCheckResult?.errors?.length === 0 ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Check size={12} className="text-white" />
+                                  No problem
+                                </span>
+                              ) : (
+                                'Check Syntax'
+                              )}
                             </button>
                           </div>
                         )}
@@ -4741,7 +5517,18 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                           options={{
                             minimap: { enabled: false },
                             fontSize: 14,
-                            automaticLayout: true
+                            automaticLayout: true,
+                            wordWrap: activeLanguage === 'java' ? 'on' : 'off',
+                            scrollbar:
+                              activeLanguage === 'java'
+                                ? {
+                                    vertical: 'hidden',
+                                    horizontal: 'hidden',
+                                    alwaysConsumeMouseWheel: false
+                                  }
+                                : {
+                                    alwaysConsumeMouseWheel: false
+                                  }
                           }}
                         />
                         {fileLoading && (
@@ -4824,6 +5611,29 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                 </div>
               )}
             </div>
+
+            {terminalOpen && (
+              <div
+                className="absolute inset-x-0 bottom-0 z-20 overflow-hidden border-t border-black bg-[#1e1e1e]"
+                style={{ height: `${terminalHeight}px` }}
+              >
+                <div
+                  role="separator"
+                  aria-orientation="horizontal"
+                  onMouseDown={(event) => startResize('terminal', event)}
+                  className="h-1 cursor-row-resize bg-black/70 transition-colors hover:bg-blue-500"
+                />
+                <TerminalDock
+                  open={terminalOpen}
+                  cwd={rootFolder}
+                  onClose={() => setTerminalOpen(false)}
+                  pushActivity={pushActivity}
+                  command={terminalCommand}
+                  onCommandExecuted={() => setTerminalCommand('')}
+                  onCommandFinished={handleTerminalCommandFinished}
+                />
+              </div>
+            )}
           </main>
 
           {showAgentPanel && (
@@ -4938,18 +5748,39 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                             <div
                               className={`max-w-full wrap-break-word rounded-md px-3 py-2 text-sm ${
                                 message.role === 'user'
-                                  ? 'self-end bg-blue-600 text-white'
-                                  : 'self-start bg-[#2b2b2d] text-gray-100'
+                                  ? 'self-end bg-slate-600 text-white'
+                                  : 'self-start bg-slate-900 text-gray-100'
                               }`}
                             >
-                              <div className="mb-1 flex items-center gap-2">
+                              <div className="mb-2 flex items-center justify-between gap-2">
                                 <div className="text-[11px] font-medium opacity-80">
                                   {message.role === 'user' ? 'You' : 'Sam'}
                                 </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyMessage(message.content)}
+                                    className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10 hover:text-white"
+                                    aria-label="Copy message"
+                                  >
+                                    <Copy size={12} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEditMessage(message.content)}
+                                    className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10 hover:text-white"
+                                    aria-label="Edit message"
+                                  >
+                                    <Edit3 size={12} />
+                                  </button>
+                                </div>
                               </div>
-                              <div className="whitespace-pre-wrap leading-relaxed text-sm">
-                                {message.content}
-                              </div>
+                              <div
+                                className="leading-relaxed text-sm"
+                                dangerouslySetInnerHTML={{
+                                  __html: renderMarkdownMessage(message.content)
+                                }}
+                              />
                             </div>
                           )}
                         </div>
@@ -4976,10 +5807,13 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                     <button
                       type="button"
                       onClick={sendMessage}
-                      disabled={sending || !input.trim()}
-                      className="absolute bottom-2 right-2 rounded p-1 text-gray-200 transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-gray-600"
-                      aria-label={sending ? 'Sending message' : 'Send message'}
+                      disabled={sending || approvalBusy || !input.trim()}
+                      className="absolute bottom-2 right-2 inline-flex items-center gap-2 rounded p-1 text-gray-200 transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-gray-600"
+                      aria-label={sending || approvalBusy ? 'Sending message' : 'Send message'}
                     >
+                      {sending || approvalBusy ? (
+                        <span className="inline-flex h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      ) : null}
                       <ChevronUp size={16} />
                     </button>
                   </div>
@@ -5112,28 +5946,6 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
               </aside>
             </>
           )}
-        </div>
-
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          onMouseDown={(event) => startResize('terminal', event)}
-          className={`h-1 cursor-row-resize bg-black/70 transition-colors hover:bg-blue-500 ${terminalOpen ? 'block' : 'hidden'}`}
-        />
-
-        <div
-          style={{ height: terminalOpen ? `${terminalHeight}px` : '0px' }}
-          className="overflow-hidden border-t border-black bg-[#1e1e1e]"
-        >
-          <TerminalDock
-            open={terminalOpen}
-            cwd={rootFolder}
-            onClose={() => setTerminalOpen(false)}
-            pushActivity={pushActivity}
-            command={terminalCommand}
-            onCommandExecuted={() => setTerminalCommand('')}
-            onCommandFinished={handleTerminalCommandFinished}
-          />
         </div>
       </div>
 
