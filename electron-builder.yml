@@ -6,6 +6,9 @@ icon: build/icon
 files:
   - '!**/.vscode/*'
   - '!src/*'
+  - '!marketplace/*'
+  - '!landing/*'
+  - '!render-downloads/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
@@ -35,6 +38,7 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
+# TODO: configure a real auto-update server before shipping
 publish:
   provider: generic
-  url: https://example.com/auto-updates
+  url: https://samcode-26.web.app/updates

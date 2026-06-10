@@ -1,32 +1,18 @@
 import { app, shell, ipcMain } from 'electron'
 import fs from 'fs/promises'
-import { existsSync } from 'fs'
-import { dirname, join, resolve, isAbsolute } from 'path'
+import { dirname, join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 
 const activatedPackages = new Map()
 const packageModules = new Map() // Stores { module, activation } for deactivation
 
-const CATALOG_URL = 'https://samcode-26.web.app/catalog.json'
+// Marketplace is hosted on Firebase — extensions are NOT bundled with the app.
+// Users download extensions on demand when they click "Install".
 const MARKETPLACE_BASE_URL = 'https://samcode-26.web.app'
-
-function getMarketplaceRoot() {
-  const candidateRoots = [
-    resolve(app.getAppPath(), 'marketplace'),
-    resolve(app.getAppPath(), 'landing'),
-    resolve(process.cwd(), 'marketplace'),
-    resolve(process.cwd(), 'landing')
-  ]
-
-  return candidateRoots.find((root) => existsSync(root)) || candidateRoots[0]
-}
+const CATALOG_URL = `${MARKETPLACE_BASE_URL}/catalog.json`
 
 function getInstalledRoot() {
   return join(app.getPath('userData'), 'marketplace-installed')
-}
-
-function getCatalogPath() {
-  return join(getMarketplaceRoot(), 'catalog.json')
 }
 
 async function fileExists(filePath) {
@@ -44,160 +30,33 @@ async function readJson(filePath) {
 }
 
 async function readCatalog() {
-  let remoteCatalog = null
-  try {
-    const response = await fetch(CATALOG_URL)
-    if (!response.ok) throw new Error(`Failed to fetch catalog: ${response.status}`)
-    remoteCatalog = await response.json()
-  } catch (err) {
-    console.error('Failed to fetch catalog online, falling back to local if available:', err)
+  const response = await fetch(CATALOG_URL)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch catalog: ${response.status}`)
   }
-
-  try {
-    const localCatalog = await readJson(getCatalogPath())
-    if (!remoteCatalog) {
-      return localCatalog
-    }
-
-    const mergedItems = new Map()
-    for (const item of Array.isArray(remoteCatalog.items) ? remoteCatalog.items : []) {
-      if (item?.id) mergedItems.set(item.id, item)
-    }
-    for (const item of Array.isArray(localCatalog.items) ? localCatalog.items : []) {
-      if (item?.id) mergedItems.set(item.id, item)
-    }
-
-    return {
-      ...localCatalog,
-      ...remoteCatalog,
-      items: Array.from(mergedItems.values())
-    }
-  } catch (localErr) {
-    if (remoteCatalog) {
-      return remoteCatalog
-    }
-    throw localErr
-  }
+  return await response.json()
 }
 
 async function getCatalogItem(packageId) {
-  console.log(`[Marketplace] getCatalogItem: Looking for package "${packageId}"`)
-
-  try {
-    const catalog = await readCatalog()
-    console.log(`[Marketplace] getCatalogItem: Catalog has ${catalog.items?.length || 0} items`)
-    console.log(
-      `[Marketplace] getCatalogItem: Available package IDs: ${catalog.items?.map((i) => i.id).join(', ') || 'none'}`
-    )
-
-    const found = catalog.items.find((item) => item.id === packageId)
-    if (found) {
-      console.log(`[Marketplace] getCatalogItem: Found "${packageId}" in catalog`)
-      return found
-    }
-  } catch (err) {
-    console.error(`[Marketplace] getCatalogItem: Error reading catalog:`, err)
-  }
-
-  try {
-    const localCatalog = await readJson(getCatalogPath())
-    console.log(
-      `[Marketplace] getCatalogItem: Local catalog has ${localCatalog.items?.length || 0} items`
-    )
-    const localFound = localCatalog.items.find((item) => item.id === packageId)
-    if (localFound) {
-      console.log(`[Marketplace] getCatalogItem: Found "${packageId}" in local catalog`)
-      return localFound
-    }
-  } catch (err) {
-    console.log(
-      `[Marketplace] getCatalogItem: Error reading local catalog, trying direct manifest lookup:`,
-      err.message
-    )
-  }
-
-  console.log(
-    `[Marketplace] getCatalogItem: Package not in catalogs, checking direct manifest paths for "${packageId}"`
-  )
-  const localPackageRoots = [
-    resolve(getMarketplaceRoot(), 'packages', packageId),
-    resolve(app.getAppPath(), 'marketplace', 'packages', packageId),
-    resolve(app.getAppPath(), 'landing', 'packages', packageId),
-    resolve(process.cwd(), 'marketplace', 'packages', packageId),
-    resolve(process.cwd(), 'landing', 'packages', packageId)
-  ]
-
-  console.log(`[Marketplace] getCatalogItem: Checking paths: ${localPackageRoots.join(' | ')}`)
-
-  for (const packageRoot of localPackageRoots) {
-    const manifestPath = join(packageRoot, 'manifest.json')
-    console.log(`[Marketplace] getCatalogItem: Checking ${manifestPath}...`)
-    if (await fileExists(manifestPath)) {
-      try {
-        console.log(`[Marketplace] getCatalogItem: Found manifest at ${manifestPath}`)
-        const manifest = await readJson(manifestPath)
-        return {
-          id: manifest.id || packageId,
-          name: manifest.name || packageId,
-          type: manifest.type || 'extension',
-          description: manifest.description || '',
-          path: manifestPath,
-          resolvedPath: manifestPath,
-          requires: Array.isArray(manifest.dependencies) ? manifest.dependencies : []
-        }
-      } catch (err) {
-        console.error(
-          `[Marketplace] getCatalogItem: Error reading manifest at ${manifestPath}:`,
-          err.message
-        )
-      }
-    }
-  }
-
-  console.error(`[Marketplace] getCatalogItem: Package "${packageId}" not found in any location`)
-  return null
+  const catalog = await readCatalog()
+  return catalog.items.find((item) => item.id === packageId) || null
 }
 
 async function readManifest(packageId) {
-  console.log(`[Marketplace] readManifest: Loading manifest for "${packageId}"`)
   const item = await getCatalogItem(packageId)
   if (!item) {
-    console.error(`[Marketplace] readManifest: getCatalogItem returned null for "${packageId}"`)
     throw new Error(`Unknown marketplace package: ${packageId}`)
   }
 
-  console.log(`[Marketplace] readManifest: Found item:`, {
-    id: item.id,
-    name: item.name,
-    path: item.path,
-    resolvedPath: item.resolvedPath
-  })
+  // Extensions are hosted on Firebase — always fetch remotely
+  const packagePath = item.path.startsWith('/') ? item.path.slice(1) : item.path
+  const manifestUrl = `${MARKETPLACE_BASE_URL}/${packagePath}`
 
-  const manifestPath =
-    item.resolvedPath ||
-    (isAbsolute(item.path) ? item.path : resolve(getMarketplaceRoot(), item.path))
-  const manifestUrl = isAbsolute(manifestPath)
-    ? pathToFileURL(manifestPath).href
-    : `${MARKETPLACE_BASE_URL}/${item.path}`
-  console.log(
-    `[Marketplace] readManifest: manifestPath="${manifestPath}", manifestUrl="${manifestUrl}"`
-  )
-
-  let manifest
-  try {
-    if (isAbsolute(manifestPath)) {
-      console.log(`[Marketplace] readManifest: Reading local manifest from ${manifestPath}`)
-      manifest = await readJson(manifestPath)
-    } else {
-      console.log(`[Marketplace] readManifest: Fetching manifest from ${manifestUrl}`)
-      const response = await fetch(manifestUrl)
-      if (!response.ok) throw new Error()
-      manifest = await response.json()
-    }
-  } catch (err) {
-    console.error('Failed to fetch manifest online, trying local', err)
-    manifest = await readJson(manifestPath)
+  const response = await fetch(manifestUrl)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch manifest from ${manifestUrl}: ${response.status}`)
   }
+  const manifest = await response.json()
 
   return {
     item,
@@ -385,7 +244,8 @@ async function activatePackage(packageId, context = {}) {
     shell,
     packageId,
     packageRecord: record,
-    marketplaceRoot: getMarketplaceRoot(),
+    marketplaceCatalogUrl: CATALOG_URL,
+    marketplaceBaseUrl: MARKETPLACE_BASE_URL,
     installedRoot: getInstalledRoot()
   }
 
@@ -417,41 +277,31 @@ export async function activateInstalledPackages(context = {}) {
 }
 
 export function registerMarketplaceHandlers() {
-  console.log('[Marketplace] Registering marketplace handlers...')
-
   ipcMain.handle('marketplace:getCatalog', async () => {
-    console.log('[Marketplace] Handling getCatalog')
     return await readCatalog()
   })
 
   ipcMain.handle('marketplace:listInstalledPackages', async () => {
-    console.log('[Marketplace] Handling listInstalledPackages')
     return await listInstalledPackages()
   })
 
   ipcMain.handle('marketplace:installPackage', async (_, packageId) => {
-    console.log('[Marketplace] Handling installPackage:', packageId)
     const record = await installPackage(String(packageId || '').trim())
     const activation = await activatePackage(record.id)
     return { record, activation }
   })
 
   ipcMain.handle('marketplace:uninstallPackage', async (_, packageId) => {
-    console.log('[Marketplace] Handling uninstallPackage:', packageId)
     return await uninstallPackage(String(packageId || '').trim())
   })
 
   ipcMain.handle('marketplace:activatePackage', async (_, packageId) => {
-    console.log('[Marketplace] Handling activatePackage:', packageId)
     return await activatePackage(String(packageId || '').trim())
   })
 
   ipcMain.handle('marketplace:activateInstalledPackages', async () => {
-    console.log('[Marketplace] Handling activateInstalledPackages')
     return await activateInstalledPackages()
   })
-
-  console.log('[Marketplace] All handlers registered successfully')
 }
 
 export async function getMarketplacePackageState(packageId) {

@@ -68,7 +68,6 @@ function TerminalSession({
   const initializedRef = useRef(false)
   const previousCwdRef = useRef(cwd)
   const pendingCommandTokenRef = useRef('')
-  const pendingCommandShellRef = useRef(session.shell)
   const pendingCommandOutputRef = useRef('')
   const [status, setStatus] = useState('Starting terminal...')
   const resolvedCwd = String(session.cwd || cwd || '').trim()
@@ -265,7 +264,6 @@ function TerminalSession({
               const outputBeforeMarker = buffered.slice(0, buffered.indexOf(token)).trim()
               pendingCommandTokenRef.current = ''
               pendingCommandOutputRef.current = ''
-              pendingCommandShellRef.current = session.shell
               setStatus(`Command finished with code ${exitCode}.`)
               pushActivity?.('success', `Command finished with code ${exitCode}.`)
               try {
@@ -274,7 +272,9 @@ function TerminalSession({
                   exitCode,
                   output: outputBeforeMarker
                 })
-              } catch (e) {}
+              } catch (e) {
+                console.error('Terminal command finished callback error:', e)
+              }
             }
           }
         }
@@ -286,7 +286,9 @@ function TerminalSession({
           pushActivity?.('warning', `${session.title} exited with code ${payload.exitCode}.`)
           try {
             onExit?.(payload)
-          } catch (e) {}
+          } catch (e) {
+            console.error('Terminal exit callback error:', e)
+          }
         }
       })
 
@@ -506,9 +508,13 @@ function TerminalDock({
         pendingCommandTokenRef.current = ''
         try {
           onCommandFinished?.({ sessionId: sid, exitCode })
-        } catch (e) {}
+        } catch (e) {
+          console.error('Session exit callback error:', e)
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Session exit error:', e)
+    }
   }
 
   const closeSession = (sessionId) => {
@@ -572,42 +578,44 @@ function TerminalDock({
         </div>
       </div>
 
-      <div className="flex items-center gap-1 overflow-x-auto border-b border-black bg-[#1e1e1e] px-2 py-1">
-        {sessions.map((session) => (
-          <div
-            key={session.id}
-            className={`flex min-w-0 items-center gap-2 rounded px-2 py-1 text-xs transition-colors ${activeSession?.id === session.id ? 'bg-[#2d2d2d] text-white' : 'bg-transparent text-gray-400 hover:bg-[#252526] hover:text-white'}`}
+      {sessions.length > 0 && (
+        <div className="flex items-center gap-1 overflow-x-auto border-b border-black bg-[#1e1e1e] px-2 py-1">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              className={`flex min-w-0 items-center gap-2 rounded px-2 py-1 text-xs transition-colors ${activeSession?.id === session.id ? 'bg-[#2d2d2d] text-white' : 'bg-transparent text-gray-400 hover:bg-[#252526] hover:text-white'}`}
+            >
+              <button
+                type="button"
+                onClick={() => setActiveSessionId(session.id)}
+                className="flex min-w-0 items-center gap-2 text-left"
+              >
+                <TerminalIcon size={12} className="shrink-0" />
+                <span className="max-w-40 truncate">{session.title}</span>
+                <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-gray-300">
+                  {session.shell}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => closeSession(session.id)}
+                className="rounded p-1 text-gray-400 hover:bg-[#3c3c3c] hover:text-white"
+                aria-label={`Close ${session.title}`}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => createSession(defaultShell)}
+            className="ml-1 inline-flex items-center gap-2 rounded px-2 py-2 text-xs text-gray-400 transition-colors hover:bg-[#252526] hover:text-white"
           >
-            <button
-              type="button"
-              onClick={() => setActiveSessionId(session.id)}
-              className="flex min-w-0 items-center gap-2 text-left"
-            >
-              <TerminalIcon size={12} className="shrink-0" />
-              <span className="max-w-40 truncate">{session.title}</span>
-              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-gray-300">
-                {session.shell}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => closeSession(session.id)}
-              className="rounded p-1 text-gray-400 hover:bg-[#3c3c3c] hover:text-white"
-              aria-label={`Close ${session.title}`}
-            >
-              <X size={11} />
-            </button>
-          </div>
-        ))}
-        <button
-          type="button"
-          onClick={() => createSession(defaultShell)}
-          className="ml-1 inline-flex items-center gap-2 rounded px-2 py-2 text-xs text-gray-400 transition-colors hover:bg-[#252526] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Plus size={12} />
-          New
-        </button>
-      </div>
+            <Plus size={12} />
+            New
+          </button>
+        </div>
+      )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 ? (

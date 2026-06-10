@@ -1,7 +1,6 @@
 /* eslint-disable */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Editor from '@monaco-editor/react'
-import { loader } from '@monaco-editor/react'
 import * as monaco from 'monaco-editor'
 import hljs from 'highlight.js/lib/core'
 import java from 'highlight.js/lib/languages/java'
@@ -42,6 +41,7 @@ import {
   X
 } from 'lucide-react'
 import TerminalDock from './TerminalDock'
+import { inferProviderFromConnection, normalizeEndpointOrigin, getEffectiveProvider } from '../../shared/providerUtils.js'
 
 const STORAGE_KEYS = {
   apiKey: 'samcode:apiKey',
@@ -65,6 +65,11 @@ function App() {
   const [showSettingsMenu, setShowSettingsMenu] = useState(false)
   const [showHelpMenu, setShowHelpMenu] = useState(false)
   const [marketplaceOpen, setMarketplaceOpen] = useState(false)
+  const [marketplaceCatalog, setMarketplaceCatalog] = useState(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState('')
+  const [marketplaceSearch, setMarketplaceSearch] = useState('')
+  const [marketplaceCategory, setMarketplaceCategory] = useState('all')
   const [contextMenu, setContextMenu] = useState(null)
   const [appearanceMode, setAppearanceMode] = useState(
     () => localStorage.getItem(STORAGE_KEYS.appearanceMode) || 'dark'
@@ -460,11 +465,9 @@ function App() {
   const [selectedExplorerPath, setSelectedExplorerPath] = useState('')
   const [selectedPaths, setSelectedPaths] = useState(new Set())
   const [draggedItems, setDraggedItems] = useState(null)
-  const [, setMenuForPath] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState([])
   const [deleteConfirmChoice, setDeleteConfirmChoice] = useState('delete')
-  const [, setShowRenameModal] = useState(false)
   const [renameTarget, setRenameTarget] = useState('')
   const [renameNewName, setRenameNewName] = useState('')
   const [newlyCreatedPath, setNewlyCreatedPath] = useState('')
@@ -1569,9 +1572,14 @@ function App() {
     venvPath
   ])
 
+  const findCatalogItemById = (id) => {
+    const items = marketplaceCatalog?.items || []
+    return items.find((item) => item.id === id) || null
+  }
+
   const installMarketplacePackage = (packageId) => {
-    const packageDef = marketplaceCards.find((card) => card.id === packageId)
-    if (!packageDef) return
+    const catalogItem = findCatalogItemById(packageId)
+    const packageName = catalogItem?.name || packageId
 
     const installInMain = async () => {
       try {
@@ -1585,11 +1593,12 @@ function App() {
             : []
 
           setInstalledPackages(packageIds)
-          setStatus(`${packageDef.name} installed.`)
-          pushActivity('success', `${packageDef.name} installed and activated.`)
+          setStatus(`${packageName} installed.`)
+          pushActivity('success', `${packageName} installed and activated.`)
           return
         }
 
+        // Fallback: resolve dependencies from catalog
         const queue = [packageId]
         const resolved = new Set()
 
@@ -1600,18 +1609,18 @@ function App() {
           }
 
           resolved.add(currentId)
-          const dependency = marketplaceCards.find((card) => card.id === currentId)
+          const dependency = findCatalogItemById(currentId)
           const nextDependencies = Array.isArray(dependency?.requires) ? dependency.requires : []
           nextDependencies.forEach((dependencyId) => queue.push(dependencyId))
         }
 
         setInstalledPackages((current) => Array.from(new Set([...current, ...resolved])))
-        setStatus(`${packageDef.name} installed.`)
-        pushActivity('success', `${packageDef.name} installed and ready.`)
+        setStatus(`${packageName} installed.`)
+        pushActivity('success', `${packageName} installed and ready.`)
       } catch (error) {
         console.error('Install error:', error)
-        pushActivity('error', `Failed to install ${packageDef.name}: ${error.message}`)
-        setStatus(`Failed to install ${packageDef.name}.`)
+        pushActivity('error', `Failed to install ${packageName}: ${error.message}`)
+        setStatus(`Failed to install ${packageName}.`)
       }
     }
 
@@ -1619,8 +1628,8 @@ function App() {
   }
 
   const uninstallMarketplacePackage = (packageId) => {
-    const packageDef = marketplaceCards.find((card) => card.id === packageId)
-    if (!packageDef) return
+    const catalogItem = findCatalogItemById(packageId)
+    const packageName = catalogItem?.name || packageId
 
     const uninstallInMain = async () => {
       try {
@@ -1634,18 +1643,18 @@ function App() {
             : []
 
           setInstalledPackages(packageIds)
-          setStatus(`${packageDef.name} removed.`)
-          pushActivity('success', `${packageDef.name} uninstalled.`)
+          setStatus(`${packageName} removed.`)
+          pushActivity('success', `${packageName} uninstalled.`)
           return
         }
 
         setInstalledPackages((current) => current.filter((id) => id !== packageId))
-        setStatus(`${packageDef.name} removed.`)
-        pushActivity('success', `${packageDef.name} removed from the marketplace list.`)
+        setStatus(`${packageName} removed.`)
+        pushActivity('success', `${packageName} removed from the marketplace list.`)
       } catch (error) {
         console.error('Uninstall error:', error)
-        pushActivity('error', `Failed to remove ${packageDef.name}: ${error.message}`)
-        setStatus(`Failed to remove ${packageDef.name}.`)
+        pushActivity('error', `Failed to remove ${packageName}: ${error.message}`)
+        setStatus(`Failed to remove ${packageName}.`)
       }
     }
 
@@ -1748,6 +1757,47 @@ function App() {
       cancelled = true
     }
   }, [])
+
+  // Load marketplace catalog when the marketplace modal opens
+  useEffect(() => {
+    if (!marketplaceOpen) return undefined
+
+    let cancelled = false
+    setCatalogLoading(true)
+    setCatalogError('')
+
+    const loadCatalog = async () => {
+      try {
+        if (window.api?.getMarketplaceCatalog) {
+          const catalog = await window.api.getMarketplaceCatalog()
+          if (cancelled) return
+          setMarketplaceCatalog(catalog)
+        } else {
+          if (cancelled) return
+          setCatalogError('Marketplace API is not available.')
+        }
+      } catch (error) {
+        if (cancelled) return
+        setCatalogError(String(error?.message || error))
+      } finally {
+        if (!cancelled) setCatalogLoading(false)
+      }
+    }
+
+    loadCatalog()
+
+    return () => {
+      cancelled = true
+    }
+  }, [marketplaceOpen])
+
+  // Reset marketplace filters when modal closes
+  useEffect(() => {
+    if (!marketplaceOpen) {
+      setMarketplaceSearch('')
+      setMarketplaceCategory('all')
+    }
+  }, [marketplaceOpen])
 
   useEffect(() => {
     if (!settingsOpen && !marketplaceOpen) return undefined
@@ -2308,59 +2358,6 @@ rem Script generated for ${fileName}
     return { iconColor: 'text-gray-400' }
   }
 
-  const inferProviderFromConnection = (connection) => {
-    const value = String(connection || '').trim()
-    const lower = value.toLowerCase()
-    if (!value) return 'openrouter'
-
-    if (/^https?:\/\//.test(lower)) {
-      if (lower.includes('localhost') || lower.includes('127.0.0.1') || lower.includes('/models')) {
-        return 'ollama'
-      }
-      if (lower.includes('openrouter.ai') || lower.includes('/openrouter')) {
-        return 'openrouter'
-      }
-      if (lower.includes('api.openai.com')) {
-        return 'openai'
-      }
-      if (lower.includes('googleapis.com') || lower.includes('generativelanguage')) {
-        return 'google'
-      }
-      return 'ollama'
-    }
-
-    if (/^sk-or-v1-|^or-/.test(value) || lower.includes('openrouter')) return 'openrouter'
-    if (/^sk-|^pk-|^openai|^azure/.test(value)) return 'openai'
-    if (/^AIza[A-Za-z0-9_-]{35}$/.test(value)) return 'google'
-    return 'openai'
-  }
-
-  const getEffectiveProvider = (connection, provider) => {
-    return provider === 'auto' ? inferProviderFromConnection(connection) : provider
-  }
-
-  const normalizeEndpointOrigin = (value, fallbackProtocol = 'http:') => {
-    const raw = String(value || '')
-      .trim()
-      .replace(/\/+$/, '')
-    if (!raw) return ''
-    if (/^https?:\/\//i.test(raw)) {
-      try {
-        return new URL(raw).origin
-      } catch {
-        return raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
-      }
-    }
-
-    // If user provided only a port like ":11434", assume localhost
-    if (/^:\d+$/.test(raw)) {
-      return `${fallbackProtocol}//localhost${raw}`
-    }
-
-    const stripped = raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
-    return `${fallbackProtocol}//${stripped}`
-  }
-
   const loadModels = async (connection, provider) => {
     const effectiveProvider = getEffectiveProvider(connection, provider)
     if (!String(connection || '').trim()) {
@@ -2532,7 +2529,6 @@ rem Script generated for ${fileName}
     setDeleteTarget(targets)
     setShowDeleteConfirm(true)
     setDeleteConfirmChoice('delete')
-    setMenuForPath('')
     setContextMenu(null)
   }
 
@@ -2617,8 +2613,6 @@ rem Script generated for ${fileName}
   const handleRenameRequest = (path) => {
     setRenameTarget(path)
     setRenameNewName(basenameFromPath(path))
-    setShowRenameModal(false)
-    setMenuForPath('')
     setContextMenu(null)
     if (path !== newlyCreatedPath) {
       setNewlyCreatedPath('')
@@ -2626,7 +2620,6 @@ rem Script generated for ${fileName}
   }
 
   const cancelRename = () => {
-    setShowRenameModal(false)
     setRenameTarget('')
     setRenameNewName('')
     setNewlyCreatedPath('')
@@ -2816,8 +2809,6 @@ rem Script generated for ${fileName}
     } catch (e) {
       console.error(e)
       pushActivity('error', `Clone error: ${e.message}`)
-    } finally {
-      setMenuForPath('')
     }
   }
 
@@ -2914,8 +2905,6 @@ rem Script generated for ${fileName}
       pushActivity('success', 'Path copied to clipboard.')
     } catch (e) {
       pushActivity('error', `Clipboard error: ${e.message}`)
-    } finally {
-      setMenuForPath('')
     }
   }
 
@@ -4244,13 +4233,17 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                   parsed?.candidates?.[0]?.content?.parts?.[0]?.text ??
                   ''
                 if (chunk) onChunk(chunk)
-              } catch (e) {}
+              } catch (e) {
+                // Malformed SSE line is expected during streaming, safe to skip
+              }
             } else if (line.startsWith('{')) {
               try {
                 const parsed = JSON.parse(line)
                 const chunk = parsed?.message?.content ?? parsed?.response ?? ''
                 if (chunk) onChunk(chunk)
-              } catch (e) {}
+              } catch (e) {
+                // Malformed JSON line is expected during streaming, safe to skip
+              }
             }
           }
         }
@@ -4583,8 +4576,8 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
   const activeTab = tabs.find((tab) => tab.path === activePath)
   const activeFileMissing = Boolean(activeTab?.missing)
   const packageInstallationSet = new Set(installedPackages)
-  const activeIsHtml = isHtmlFile(activePath)
-  const notebookToolbarVisible = activeIsNotebook
+  const notebookExtensionAvailable = packageInstallationSet.has('python-notebook-core')
+  const notebookToolbarVisible = activeIsNotebook && notebookExtensionAvailable
   const notebookCells = notebookToolbarVisible ? getNotebookCells() : null
   const selectedNotebookCellIndex = Array.isArray(notebookCells)
     ? activeNotebookCellIndex != null && activeNotebookCellIndex >= 0
@@ -4594,45 +4587,57 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
         : -1
     : -1
 
-  const marketplaceCards = [
-    {
-      id: 'python-notebook-core',
-      name: 'Python Notebook Core',
-      type: 'Kernel',
-      description: 'Runs notebooks cell by cell with rich outputs and notebook state.',
-      badge: 'PY',
-      accent: 'from-cyan-500/20 to-blue-500/10',
-      deps: 'Self-contained notebook runtime'
-    },
-    {
-      id: 'pandas-numpy',
-      name: 'Pandas and NumPy',
-      type: 'Package',
-      description: 'Adds pandas, NumPy and the core data analysis stack for Python notebooks.',
-      badge: 'PN',
-      accent: 'from-emerald-500/20 to-teal-500/10',
-      deps: 'Requires Python Notebook Core'
-    },
-    {
-      id: 'data-science-pack',
-      name: 'Data Science Pack',
-      type: 'Bundle',
-      description:
-        'Installs notebook core, pandas, NumPy and common data science tooling together.',
-      badge: 'DS',
-      accent: 'from-violet-500/20 to-fuchsia-500/10',
-      deps: 'Installs notebook core + pandas/numpy'
-    },
-    {
-      id: 'java-language',
-      name: 'Java Language Support',
-      type: 'Extension',
-      description: 'Adds Java snippets, lightweight formatting, and editor helpers for Java files.',
-      badge: 'JV',
-      accent: 'from-orange-500/20 to-amber-500/10',
-      deps: 'Editor helper package'
+  // Map a catalog item to marketplace card UI properties
+  const catalogItemToCard = (item) => {
+    const type = String(item.type || '').toLowerCase()
+    const accentMap = {
+      kernel: 'from-cyan-500/20 to-blue-500/10',
+      package: 'from-emerald-500/20 to-teal-500/10',
+      bundle: 'from-violet-500/20 to-fuchsia-500/10',
+      extension: 'from-orange-500/20 to-amber-500/10',
+      plugin: 'from-pink-500/20 to-rose-500/10'
     }
-  ]
+    const badgeMap = {
+      kernel: 'KR',
+      package: 'PKG',
+      bundle: 'BND',
+      extension: 'EXT',
+      plugin: 'PLG'
+    }
+    // Generate a 2-letter badge from the name if no mapping exists
+    const nameParts = String(item.name || '').split(' ').filter(Boolean)
+    const badge = badgeMap[type] || (nameParts.length > 1
+      ? (nameParts[0][0] + nameParts[1][0]).toUpperCase()
+      : nameParts[0].slice(0, 2).toUpperCase())
+
+    // Build dependency description
+    const deps = Array.isArray(item.requires) && item.requires.length > 0
+      ? `Requires: ${item.requires.join(', ')}`
+      : 'Self-contained'
+
+    return {
+      ...item,
+      badge,
+      accent: accentMap[type] || accentMap.extension,
+      deps
+    }
+  }
+
+  // Filter catalog items by search term and category
+  const getFilteredCatalogItems = () => {
+    const items = marketplaceCatalog?.items || []
+    return items.filter((item) => {
+      const matchesSearch = !marketplaceSearch ||
+        item.name.toLowerCase().includes(marketplaceSearch.toLowerCase()) ||
+        item.description.toLowerCase().includes(marketplaceSearch.toLowerCase()) ||
+        item.id.toLowerCase().includes(marketplaceSearch.toLowerCase())
+      const matchesCategory = marketplaceCategory === 'all' ||
+        String(item.type || '').toLowerCase() === marketplaceCategory.toLowerCase()
+      return matchesSearch && matchesCategory
+    })
+  }
+
+  const filteredCatalogItems = getFilteredCatalogItems()
   const footerStatus = status
 
   return (
@@ -5225,7 +5230,24 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                   )}
 
                   <div className="relative min-h-0 flex-1 overflow-hidden p-4">
-                    {activeIsNotebook ? (
+                    {activeIsNotebook && !notebookExtensionAvailable ? (
+                      <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
+                        <Store size={48} className="mb-4 text-gray-500" />
+                        <h3 className="mb-2 text-lg font-semibold text-white">
+                          Notebook extension not installed
+                        </h3>
+                        <p className="mb-4 max-w-sm text-sm text-gray-400">
+                          Install the <strong className="text-white">Python Notebook Core</strong> extension from the Marketplace to open and run notebooks.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setMarketplaceOpen(true)}
+                          className="rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
+                        >
+                          Open Marketplace
+                        </button>
+                      </div>
+                    ) : activeIsNotebook && notebookExtensionAvailable ? (
                       (() => {
                         try {
                           const notebook = safeParseNotebook(code || '{}')
@@ -5965,7 +5987,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                   Sam Code Marketplace
                 </div>
                 <p className="mt-1 text-xs text-gray-400">
-                  Packages, plugins, kernels and notebook tooling for Sam Code.
+                  Browse, install, and manage extensions for Sam Code.
                 </p>
               </div>
               <button
@@ -5984,15 +6006,22 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                 </div>
                 <div className="space-y-2">
                   {[
-                    ['Featured', 'Notebook runtimes and starter packs'],
-                    ['Packages', 'Reusable dependencies and helpers'],
-                    ['Plugins', 'Editor and workflow extensions'],
-                    ['Kernels', 'Execution engines for notebooks']
-                  ].map(([label, description]) => (
+                    ['all', 'All Extensions', 'All available extensions'],
+                    ['kernel', 'Kernels', 'Execution engines for notebooks'],
+                    ['package', 'Packages', 'Reusable dependencies and helpers'],
+                    ['extension', 'Extensions', 'Editor and workflow extensions'],
+                    ['bundle', 'Bundles', 'Curated multi-package collections'],
+                    ['plugin', 'Plugins', 'Tools and integrations']
+                  ].map(([key, label, description]) => (
                     <button
-                      key={label}
+                      key={key}
                       type="button"
-                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-left transition-colors hover:bg-white/10"
+                      onClick={() => setMarketplaceCategory(key)}
+                      className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${
+                        marketplaceCategory === key
+                          ? 'border-cyan-500/30 bg-cyan-500/10'
+                          : 'border-white/10 bg-white/5 hover:bg-white/10'
+                      }`}
                     >
                       <div className="text-sm font-semibold text-white">{label}</div>
                       <div className="mt-1 text-xs text-gray-400">{description}</div>
@@ -6001,8 +6030,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                 </div>
 
                 <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3 text-xs text-cyan-100">
-                  The online catalog will live in the marketplace folder and load lazily into the
-                  editor.
+                  Extensions install into isolated folders and load on demand.
                 </div>
               </aside>
 
@@ -6011,61 +6039,103 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                   <div>
                     <div className="text-lg font-semibold text-white">Available extensions</div>
                     <div className="text-xs text-gray-400">
-                      Packages will install into isolated folders and stay out of the editor bundle.
+                      {filteredCatalogItems.length} extension{filteredCatalogItems.length !== 1 ? 's' : ''}
+                      {marketplaceSearch || marketplaceCategory !== 'all' ? ' (filtered)' : ''}
                     </div>
                   </div>
                   <label className="flex w-full max-w-sm items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-300">
                     <Search size={14} className="shrink-0 text-gray-500" />
                     <input
                       type="text"
+                      value={marketplaceSearch}
+                      onChange={(e) => setMarketplaceSearch(e.target.value)}
                       placeholder="Search marketplace"
                       className="w-full bg-transparent outline-none placeholder:text-gray-500"
                     />
                   </label>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-2">
-                  {marketplaceCards.map((item) => (
-                    <article
-                      key={item.id}
-                      className={`rounded-2xl border border-white/10 bg-linear-to-br ${item.accent} p-4 shadow-lg shadow-black/20`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-white">{item.name}</div>
-                          <div className="mt-1 text-[11px] uppercase tracking-[0.25em] text-gray-400">
-                            {item.type}
-                          </div>
-                        </div>
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-black/20 text-sm font-bold text-white">
-                          {item.badge}
-                        </div>
-                      </div>
-                      <p className="mt-3 text-sm leading-6 text-gray-300">{item.description}</p>
-                      <div className="mt-4 flex items-center justify-between gap-3">
-                        <div className="flex flex-col gap-1 text-xs text-gray-400">
-                          <span>{item.deps}</span>
-                          <span>
-                            {installedPackages.includes(item.id)
-                              ? 'Installed and available in the workspace UI.'
-                              : 'Install to unlock its UI requirements.'}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            installedPackages.includes(item.id)
-                              ? uninstallMarketplacePackage(item.id)
-                              : installMarketplacePackage(item.id)
-                          }
-                          className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-gray-400"
+                {catalogLoading && (
+                  <div className="flex flex-col items-center justify-center py-16 text-center text-sm text-gray-400">
+                    <RefreshCw size={24} className="mb-3 animate-spin text-blue-400" />
+                    <div>Loading marketplace catalog…</div>
+                  </div>
+                )}
+
+                {catalogError && (
+                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+                    <div className="font-semibold">Failed to load catalog</div>
+                    <div className="mt-1 text-xs text-red-300">{catalogError}</div>
+                  </div>
+                )}
+
+                {!catalogLoading && !catalogError && filteredCatalogItems.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-16 text-center text-sm text-gray-400">
+                    <Search size={24} className="mb-3 text-gray-500" />
+                    <div>
+                      {marketplaceSearch
+                        ? `No extensions match "${marketplaceSearch}"`
+                        : 'No extensions found for this category'}
+                    </div>
+                  </div>
+                )}
+
+                {!catalogLoading && !catalogError && filteredCatalogItems.length > 0 && (
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-2">
+                    {filteredCatalogItems.map((item) => {
+                      const card = catalogItemToCard(item)
+                      const isInstalled = packageInstallationSet.has(item.id)
+                      return (
+                        <article
+                          key={item.id}
+                          className={`rounded-2xl border border-white/10 bg-linear-to-br ${card.accent} p-4 shadow-lg shadow-black/20`}
                         >
-                          {installedPackages.includes(item.id) ? 'Remove' : 'Install'}
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-white">{item.name}</div>
+                              <div className="mt-1 text-[11px] uppercase tracking-[0.25em] text-gray-400">
+                                {item.type}
+                              </div>
+                            </div>
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-black/20 text-sm font-bold text-white">
+                              {card.badge}
+                            </div>
+                          </div>
+                          <p className="mt-3 text-sm leading-6 text-gray-300">{item.description}</p>
+                          <div className="mt-4 flex items-center justify-between gap-3">
+                            <div className="flex flex-col gap-1 text-xs text-gray-400">
+                              <span>{card.deps}</span>
+                              <span>
+                                {isInstalled
+                                  ? 'Installed and available.'
+                                  : 'Click Install to add this extension.'}
+                              </span>
+                            </div>
+                            {isInstalled ? (
+                              <button
+                                type="button"
+                                onClick={() => uninstallMarketplacePackage(item.id)}
+                                className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 transition-colors hover:bg-red-500/20 hover:border-red-500/50"
+                              >
+                                <X size={12} />
+                                Remove
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => installMarketplacePackage(item.id)}
+                                className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/30"
+                              >
+                                <Check size={12} />
+                                Install
+                              </button>
+                            )}
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                )}
 
                 <div className="mt-5 rounded-2xl border border-white/10 bg-[#111827] p-4 text-sm text-gray-300">
                   Marketplace packages will be downloaded into the local marketplace workspace and

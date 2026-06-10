@@ -11,22 +11,6 @@
       "path": "packages/python-notebook-core/manifest.json"
     },
     {
-      "id": "pandas-numpy",
-      "name": "Pandas and NumPy",
-      "type": "package",
-      "description": "Adds the core data analysis libraries used in Python notebooks.",
-      "path": "packages/pandas-numpy/manifest.json",
-      "requires": ["python-notebook-core"]
-    },
-    {
-      "id": "data-science-pack",
-      "name": "Data Science Pack",
-      "type": "bundle",
-      "description": "Installs notebook core, pandas, NumPy and common data science tools together.",
-      "path": "packages/data-science-pack/manifest.json",
-      "requires": ["python-notebook-core", "pandas-numpy"]
-    },
-    {
       "id": "live-server",
       "name": "Live Server",
       "type": "plugin",

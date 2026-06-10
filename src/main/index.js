@@ -9,6 +9,7 @@ import fs from 'fs/promises'
 import pty from 'node-pty'
 import icon from '../../resources/1.png?asset'
 import { registerMarketplaceHandlers, activateInstalledPackages } from './marketplace.js'
+import { inferProviderFromConnection, normalizeEndpointOrigin, isUrl, normalizeUrl, urlHasPath } from '../shared/providerUtils.js'
 
 const terminalSessions = new Map()
 const notebookSessions = new Map()
@@ -1391,65 +1392,7 @@ app.whenReady().then(() => {
     const selectedProvider = String(provider || 'auto')
       .trim()
       .toLowerCase()
-    const inferProvider = (input) => {
-      const lowerValue = String(input || '')
-        .trim()
-        .toLowerCase()
-      if (!lowerValue) return 'openrouter'
-      if (/^https?:\/\//.test(lowerValue)) {
-        if (
-          lowerValue.includes('localhost') ||
-          lowerValue.includes('127.0.0.1') ||
-          lowerValue.includes('/models')
-        ) {
-          return 'ollama'
-        }
-        if (lowerValue.includes('openrouter.ai') || lowerValue.includes('/openrouter')) {
-          return 'openrouter'
-        }
-        if (lowerValue.includes('api.openai.com')) {
-          return 'openai'
-        }
-        if (lowerValue.includes('googleapis.com') || lowerValue.includes('generativelanguage')) {
-          return 'google'
-        }
-        return 'ollama'
-      }
-      if (/^sk-or-v1-|^or-/.test(value) || lowerValue.includes('openrouter')) return 'openrouter'
-      if (/^sk-|^pk-|^openai|^azure/.test(lowerValue)) return 'openai'
-      if (/^AIza[A-Za-z0-9_-]{35}$/.test(value)) return 'google'
-      return 'openai'
-    }
-
-    const providerToUse = selectedProvider === 'auto' ? inferProvider(value) : selectedProvider
-    const isUrl = (input) => {
-      try {
-        new URL(input)
-        return true
-      } catch {
-        return false
-      }
-    }
-    const normalizeUrl = (url) =>
-      String(url || '')
-        .trim()
-        .replace(/\/+$/, '')
-    const hasPath = (url, path) => normalizeUrl(url).toLowerCase().includes(path)
-    const normalizeOrigin = (input, fallbackProtocol = 'http:') => {
-      const raw = String(input || '')
-        .trim()
-        .replace(/\/+$/, '')
-      if (!raw) return ''
-      if (/^https?:\/\//i.test(raw)) {
-        try {
-          return new URL(raw).origin
-        } catch {
-          return raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
-        }
-      }
-      const stripped = raw.replace(/\/(api\/(chat|tags)|v1\/models|models).*$/i, '')
-      return `${fallbackProtocol}//${stripped}`
-    }
+    const providerToUse = selectedProvider === 'auto' ? inferProviderFromConnection(value) : selectedProvider
 
     const listOpenAIModels = async (key) => {
       const endpoint = isUrl(key) ? normalizeUrl(key) : 'https://api.openai.com'
@@ -1457,7 +1400,7 @@ app.whenReady().then(() => {
       if (isUrl(key)) {
         if (endpoint.endsWith('/models')) {
           url = endpoint
-        } else if (hasPath(endpoint, '/v1')) {
+        } else if (urlHasPath(endpoint, '/v1')) {
           url = `${endpoint}/models`
         } else {
           url = `${endpoint}/v1/models`
@@ -1496,7 +1439,7 @@ app.whenReady().then(() => {
       if (isUrl(key)) {
         if (endpoint.endsWith('/models')) {
           url = endpoint
-        } else if (hasPath(endpoint, '/v1')) {
+        } else if (urlHasPath(endpoint, '/v1')) {
           url = `${endpoint}/models`
         } else {
           url = `${endpoint}/v1/models`
@@ -1536,7 +1479,7 @@ app.whenReady().then(() => {
           modelsUrl = endpoint
         } else if (endpoint.includes('/chat/completions')) {
           modelsUrl = endpoint.replace(/\/chat\/completions.*$/i, '/models')
-        } else if (hasPath(endpoint, '/api/v1')) {
+        } else if (urlHasPath(endpoint, '/api/v1')) {
           modelsUrl = `${endpoint}/models`
         } else {
           modelsUrl = `${endpoint}/api/v1/models`
@@ -1572,7 +1515,7 @@ app.whenReady().then(() => {
     }
 
     const listOllamaModels = async (endpoint) => {
-      const base = normalizeOrigin(endpoint, 'http:')
+      const base = normalizeEndpointOrigin(endpoint, 'http:')
       const candidates = [`${base}/api/tags`, `${base}/v1/models`, `${base}/models`]
 
       let lastError = null
