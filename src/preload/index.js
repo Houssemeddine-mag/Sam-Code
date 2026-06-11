@@ -21,6 +21,7 @@ const api = {
   deletePath: (targetPath) => ipcRenderer.invoke('fs:delete', targetPath),
   renamePath: (oldPath, newPath) => ipcRenderer.invoke('fs:rename', oldPath, newPath),
   copyPath: (src, dest) => ipcRenderer.invoke('fs:copy', src, dest),
+  readFileAsArrayBuffer: (filePath) => ipcRenderer.invoke('fs:readFileAsArrayBuffer', filePath),
   zoomIn: () => ipcRenderer.invoke('zoom:in'),
   zoomOut: () => ipcRenderer.invoke('zoom:out'),
   runCommand: (payload) => ipcRenderer.invoke('shell:runCommand', payload),

@@ -1,0 +1,15 @@
+{
+  "id": "pdf-viewer",
+  "name": "PDF Viewer",
+  "version": "1.0.0",
+  "description": "View PDF files directly inside Sam Code with a built-in reader. Supports multi-page navigation, zoom, and dark-mode themed UI.",
+  "type": "extension",
+  "entry": "index.mjs",
+  "runtime": "main",
+  "features": ["file-viewer"],
+  "fileExtensions": [".pdf"],
+  "ui": {
+    "component": "PdfViewer",
+    "fileTypes": ["pdf"]
+  }
+}

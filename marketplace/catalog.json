@@ -24,6 +24,13 @@
       "type": "extension",
       "description": "Adds Java snippets, lightweight formatting, and editor helpers for Java files.",
       "path": "packages/java-language/manifest.json"
+    },
+    {
+      "id": "pdf-viewer",
+      "name": "PDF Viewer",
+      "type": "extension",
+      "description": "View PDF files directly inside Sam Code with a built-in reader. Supports multi-page navigation, zoom, and dark-mode themed UI.",
+      "path": "packages/pdf-viewer/manifest.json"
     }
   ]
 }

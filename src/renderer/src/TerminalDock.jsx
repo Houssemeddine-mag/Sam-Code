@@ -69,6 +69,7 @@ function TerminalSession({
   const previousCwdRef = useRef(cwd)
   const pendingCommandTokenRef = useRef('')
   const pendingCommandOutputRef = useRef('')
+  const resizeObserverRef = useRef(null)
   const [status, setStatus] = useState('Starting terminal...')
   const resolvedCwd = String(session.cwd || cwd || '').trim()
 
@@ -97,7 +98,6 @@ function TerminalSession({
     }
 
     terminalRef.current.focus()
-    refreshPrompt()
     return true
   }
 
@@ -126,6 +126,11 @@ function TerminalSession({
 
   const cleanup = () => {
     clearPendingTimers()
+
+    if (resizeObserverRef.current) {
+      resizeObserverRef.current.disconnect()
+      resizeObserverRef.current = null
+    }
 
     if (dataDisposeRef.current) {
       dataDisposeRef.current()
@@ -304,9 +309,21 @@ function TerminalSession({
         }
       })
 
+      // Initial fit
       fitTimerRef.current = window.setTimeout(() => {
         fitTerminal()
       }, 0)
+
+      // Watch container size changes (e.g. during panel drag resize) and refit terminal
+      if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+        resizeObserverRef.current = new ResizeObserver(() => {
+          if (initializedRef.current && fitAddonRef.current) {
+            // Use setTimeout to let React flush the layout before refitting
+            window.setTimeout(() => fitTerminal(), 10)
+          }
+        })
+        resizeObserverRef.current.observe(containerRef.current)
+      }
     }
 
     initialize()

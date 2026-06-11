@@ -8,6 +8,7 @@ This folder is the local workspace for SamCode marketplace content.
 - `pandas-numpy` for the core pandas and NumPy analysis stack
 - `data-science-pack` for the full notebook and data science bundle
 - `live-server` for previewing HTML files with auto reload
+- `pdf-viewer` for viewing PDF files inside the editor
 
 ## Layout
 

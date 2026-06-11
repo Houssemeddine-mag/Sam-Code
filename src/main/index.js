@@ -976,6 +976,22 @@ app.whenReady().then(() => {
     }
   })
 
+  ipcMain.handle('fs:readFileAsArrayBuffer', async (_, filePath) => {
+    try {
+      const buffer = await fs.readFile(String(filePath || ''))
+      return {
+        ok: true,
+        buffer: Array.from(buffer),
+        size: buffer.length
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        error: String(error?.message || error)
+      }
+    }
+  })
+
   ipcMain.handle('fs:makeDir', async (_, dirPath) => {
     try {
       await fs.mkdir(String(dirPath || ''), { recursive: true })

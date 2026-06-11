@@ -41,6 +41,7 @@ import {
   X
 } from 'lucide-react'
 import TerminalDock from './TerminalDock'
+import PdfViewer from './PdfViewer'
 import { inferProviderFromConnection, normalizeEndpointOrigin, getEffectiveProvider, isUrl } from '../../shared/providerUtils.js'
 
 const STORAGE_KEYS = {
@@ -112,6 +113,7 @@ function App() {
   const agentLoopResumeRef = useRef(null)
   const editorMainRef = useRef(null)
   const messagesScrollRef = useRef(null)
+  const mainRef = useRef(null)
 
   // Diff view state — shows old vs new code in a temporary split tab
   const [diffView, setDiffView] = useState(null) // { path, oldContent, newContent, operations }
@@ -2555,10 +2557,13 @@ One sentence summary, then a JSON block with "summary" and "operations". When th
       }
 
       if (kind === 'terminal') {
+        const mainEl = mainRef.current
+        if (!mainEl) return
+        const mainBottom = mainEl.getBoundingClientRect().bottom
         const nextHeight = clamp(
-          window.innerHeight - event.clientY,
+          Math.round(mainBottom - event.clientY),
           180,
-          Math.round(window.innerHeight * 0.65)
+          Math.round(mainEl.clientHeight * 0.65)
         )
         setTerminalHeight(nextHeight)
       }
@@ -5542,6 +5547,8 @@ rem Script generated for ${fileName}
   const packageInstallationSet = new Set(installedPackages)
   const notebookExtensionAvailable = packageInstallationSet.has('python-notebook-core')
   const notebookToolbarVisible = activeIsNotebook && notebookExtensionAvailable
+  const pdfViewerAvailable = packageInstallationSet.has('pdf-viewer')
+  const activeIsPdf = activePath ? activePath.toLowerCase().endsWith('.pdf') : false
   const notebookCells = notebookToolbarVisible ? getNotebookCells() : null
   const selectedNotebookCellIndex = Array.isArray(notebookCells)
     ? activeNotebookCellIndex != null && activeNotebookCellIndex >= 0
@@ -5987,6 +5994,7 @@ rem Script generated for ${fileName}
           )}
 
           <main
+            ref={mainRef}
             className={`relative flex min-w-0 flex-1 flex-col ${showAgentPanel ? 'border-r' : ''} ${appearanceMode === 'light' ? 'border-gray-200 bg-[#f8fafc]' : 'border-black bg-[#1e1e1e]'}`}
           >
             {tabs.length > 0 && (
@@ -6285,6 +6293,33 @@ rem Script generated for ${fileName}
                     </div>
                   )}
 
+                  {activeIsPdf && pdfViewerAvailable && (
+                    <PdfViewer filePath={activePath} pushActivity={pushActivity} />
+                  )}
+
+                  {activeIsPdf && !pdfViewerAvailable && (
+                    <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
+                      <Store size={48} className="mb-4 text-gray-500" />
+                      <h3 className="mb-2 text-lg font-semibold text-white">
+                        PDF Viewer not installed
+                      </h3>
+                      <p className="mb-4 max-w-sm text-sm text-gray-400">
+                        Install the {' '}
+                        <strong className="text-white">PDF Viewer</strong>{' '}
+                        extension from the Marketplace to open PDF files in the
+                        editor.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setMarketplaceOpen(true)}
+                        className="rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
+                      >
+                        Open Marketplace
+                      </button>
+                    </div>
+                  )}
+
+                  {!activeIsPdf && (
                   <div className="samcode-scrollbar relative min-h-0 flex-1 overflow-auto p-4">
                     {activeIsNotebook && !notebookExtensionAvailable ? (
                       <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
@@ -6623,6 +6658,7 @@ rem Script generated for ${fileName}
                       </>
                     )}
                   </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex h-full flex-col items-center pt-24 text-center text-gray-400 bg-transparent">
