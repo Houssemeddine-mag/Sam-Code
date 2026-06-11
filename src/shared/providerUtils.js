@@ -3,9 +3,22 @@
  * Keep this file free of Node.js/Electron-only imports so it works in both contexts.
  */
 
+const KNOWN_ANTHROPIC_MODELS = [
+  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4' },
+  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
+  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' },
+  { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
+  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus' },
+  { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku' }
+]
+
+const KNOWN_OPENCODE_MODELS = [
+  { id: 'zen', name: 'OpenCode Zen' }
+]
+
 /**
  * Infer the AI provider type from a connection string, API key, or endpoint URL.
- * Returns one of: 'openrouter' | 'openai' | 'google' | 'ollama'
+ * Returns one of: 'openrouter' | 'openai' | 'google' | 'ollama' | 'anthropic' | 'opencode'
  */
 export function inferProviderFromConnection(connection) {
   const value = String(connection || '').trim()
@@ -15,6 +28,12 @@ export function inferProviderFromConnection(connection) {
   if (/^https?:\/\//.test(lower)) {
     if (lower.includes('localhost') || lower.includes('127.0.0.1') || lower.includes('/models')) {
       return 'ollama'
+    }
+    if (lower.includes('anthropic.com') || lower.includes('api.anthropic')) {
+      return 'anthropic'
+    }
+    if (lower.includes('opencode') || lower.includes('open-code')) {
+      return 'opencode'
     }
     if (lower.includes('openrouter.ai') || lower.includes('/openrouter')) {
       return 'openrouter'
@@ -28,6 +47,7 @@ export function inferProviderFromConnection(connection) {
     return 'ollama'
   }
 
+  if (/^sk-ant-/.test(value)) return 'anthropic'
   if (/^sk-or-v1-|^or-/.test(value) || lower.includes('openrouter')) return 'openrouter'
   if (/^sk-|^pk-|^openai|^azure/.test(value)) return 'openai'
   if (/^AIza[A-Za-z0-9_-]{35}$/.test(value)) return 'google'
@@ -95,4 +115,18 @@ export function normalizeUrl(value) {
  */
 export function urlHasPath(value, path) {
   return normalizeUrl(value).toLowerCase().includes(path)
+}
+
+/**
+ * Known Anthropic models (Anthropic has no public models listing API).
+ */
+export function getKnownAnthropicModels() {
+  return KNOWN_ANTHROPIC_MODELS.slice()
+}
+
+/**
+ * Known OpenCode models (limited public listing).
+ */
+export function getKnownOpenCodeModels() {
+  return KNOWN_OPENCODE_MODELS.slice()
 }

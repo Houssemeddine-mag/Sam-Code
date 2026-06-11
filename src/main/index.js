@@ -9,7 +9,7 @@ import fs from 'fs/promises'
 import pty from 'node-pty'
 import icon from '../../resources/1.png?asset'
 import { registerMarketplaceHandlers, activateInstalledPackages } from './marketplace.js'
-import { inferProviderFromConnection, normalizeEndpointOrigin, isUrl, normalizeUrl, urlHasPath } from '../shared/providerUtils.js'
+import { inferProviderFromConnection, normalizeEndpointOrigin, isUrl, normalizeUrl, urlHasPath, getKnownAnthropicModels, getKnownOpenCodeModels } from '../shared/providerUtils.js'
 
 const terminalSessions = new Map()
 const notebookSessions = new Map()
@@ -1189,6 +1189,46 @@ app.whenReady().then(() => {
           continue
         }
 
+        if (action === 'read') {
+          try {
+            const stats = await fs.stat(targetPath)
+            if (stats.isDirectory()) {
+              const entries = await fs.readdir(targetPath, { withFileTypes: true })
+              const items = entries.map((entry) => ({
+                name: entry.name,
+                isDirectory: entry.isDirectory(),
+                path: join(targetPath, entry.name)
+              }))
+              applied.push({ action: 'read', path: targetPath, content: null, directory: items })
+              continue
+            }
+            const maxBytes = 200 * 1024 // 200KB max
+            if (stats.size > maxBytes) {
+              const handle = await fs.open(targetPath, 'r')
+              try {
+                const buffer = Buffer.alloc(maxBytes)
+                const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0)
+                applied.push({
+                  action: 'read',
+                  path: targetPath,
+                  content: buffer.toString('utf-8', 0, bytesRead),
+                  truncated: true,
+                  size: stats.size
+                })
+              } finally {
+                await handle.close()
+              }
+              continue
+            }
+            const content = await fs.readFile(targetPath, 'utf-8')
+            applied.push({ action: 'read', path: targetPath, content, truncated: false, size: stats.size })
+            continue
+          } catch (readErr) {
+            failed.push({ action, path: rawPath, reason: `Failed to read: ${readErr.message}` })
+            continue
+          }
+        }
+
         failed.push({ action, path: rawPath, reason: `Unsupported action: ${action}` })
       } catch (error) {
         failed.push({ action, path: rawPath, reason: error.message })
@@ -1556,6 +1596,48 @@ app.whenReady().then(() => {
       throw lastError || new Error('Failed to load Ollama models')
     }
 
+    const listAnthropicModels = async (key) => {
+      // Anthropic doesn't expose a models listing API
+      return getKnownAnthropicModels()
+    }
+
+    const listOpenCodeModels = async (endpoint) => {
+      const base = normalizeEndpointOrigin(endpoint || 'https://api.opencode.ai', 'https:')
+      // Try fetching known models endpoint
+      const candidates = [`${base}/v1/models`, `${base}/models`]
+      let lastError = null
+      for (const url of candidates) {
+        try {
+          const response = await fetch(url, {
+            headers: { Accept: 'application/json' }
+          })
+          if (!response.ok) {
+            lastError = new Error(`OpenCode returned ${response.status}`)
+            continue
+          }
+          const payload = await response.json()
+          const models = Array.isArray(payload?.data)
+            ? payload.data
+            : Array.isArray(payload?.models)
+              ? payload.models
+              : Array.isArray(payload)
+                ? payload
+                : []
+          return models
+            .map((model) => ({
+              id: typeof model === 'string' ? model : model.id || model.name,
+              name: typeof model === 'string' ? model : model.name || model.id
+            }))
+            .filter((model) => Boolean(model.id))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        } catch (error) {
+          lastError = error
+        }
+      }
+      // Fallback to known models
+      return getKnownOpenCodeModels()
+    }
+
     if (!value) {
       return []
     }
@@ -1570,6 +1652,10 @@ app.whenReady().then(() => {
           return await listOllamaModels(value)
         case 'openrouter':
           return await listOpenRouterModels(value)
+        case 'anthropic':
+          return await listAnthropicModels(value)
+        case 'opencode':
+          return await listOpenCodeModels(value)
         default:
           return await listOllamaModels(value)
       }

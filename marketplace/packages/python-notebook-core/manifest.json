@@ -1,0 +1,20 @@
+{
+  "id": "python-notebook-core",
+  "name": "Python Notebook Core",
+  "type": "kernel",
+  "version": "1.0.0",
+  "description": "Runs notebooks cell by cell with rich outputs and notebook state.",
+  "entry": "index.mjs",
+  "runtime": {
+    "language": "javascript"
+  },
+  "features": [
+    "notebook cell execution",
+    "python notebook runtime",
+    "rich output rendering"
+  ],
+  "ui": {
+    "requirements": ["notebook-toolbar"]
+  },
+  "dependencies": []
+}

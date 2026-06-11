@@ -41,7 +41,7 @@ import {
   X
 } from 'lucide-react'
 import TerminalDock from './TerminalDock'
-import { inferProviderFromConnection, normalizeEndpointOrigin, getEffectiveProvider } from '../../shared/providerUtils.js'
+import { inferProviderFromConnection, normalizeEndpointOrigin, getEffectiveProvider, isUrl } from '../../shared/providerUtils.js'
 
 const STORAGE_KEYS = {
   apiKey: 'samcode:apiKey',
@@ -109,7 +109,10 @@ function App() {
   const [fileLoading, setFileLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const generationAbortRef = useRef(null)
+  const agentLoopResumeRef = useRef(null)
   const editorMainRef = useRef(null)
+  const messagesScrollRef = useRef(null)
+
   const [code, setCode] = useState('')
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEYS.apiKey) || '')
   const [apiProvider, setApiProvider] = useState(
@@ -135,6 +138,17 @@ function App() {
   const [agentEnvironment, setAgentEnvironment] = useState(null)
   const [agentErrorHistory, setAgentErrorHistory] = useState([])
   const [agentAutoRetry, setAgentAutoRetry] = useState(false)
+
+  // Auto-scroll messages to bottom during generation
+  useEffect(() => {
+    if (messagesScrollRef.current) {
+      messagesScrollRef.current.scrollTo({
+        top: messagesScrollRef.current.scrollHeight,
+        behavior: sending ? 'auto' : 'smooth'
+      })
+    }
+  }, [messages, sending])
+
   const [installedPackages, setInstalledPackages] = useState(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.installedPackages)
@@ -530,6 +544,53 @@ function App() {
 
   const hasApi = () => typeof window !== 'undefined' && window.api
 
+  // Build a compact workspace tree (top 2 levels) for the agent system prompt
+  const buildWorkspaceTree = async (folderPath, maxDepth = 2) => {
+    if (!folderPath || !hasApi()) return ''
+    try {
+      const buildTree = async (dir, currentDepth) => {
+        if (currentDepth > maxDepth) return ''
+        const items = await window.api.readDir(dir)
+        const filtered = items.filter((item) => {
+          // Skip common ignored directories
+          const name = item.name.toLowerCase()
+          return !['node_modules', '.git', '.next', '.vscode', 'dist', 'out', 'build', '__pycache__', '.venv', 'venv'].includes(name)
+        })
+        if (filtered.length === 0) return ''
+        const lines = []
+        for (const item of filtered.slice(0, 50)) { // cap at 50 items per level
+          const prefix = '  '.repeat(currentDepth) + (item.isDirectory ? '📁 ' : '📄 ')
+          lines.push(`${prefix}${item.name}`)
+          if (item.isDirectory && currentDepth < maxDepth) {
+            const childTree = await buildTree(item.path, currentDepth + 1)
+            if (childTree) lines.push(childTree)
+          }
+        }
+        return lines.join('\n')
+      }
+      const tree = await buildTree(folderPath, 0)
+      return tree ? `WORKSPACE FILES:\n${tree}` : ''
+    } catch {
+      return ''
+    }
+  }
+
+  // Read active file content (first 200 lines) for context injection
+  const getActiveFileContext = async (filePath) => {
+    if (!filePath || !hasApi()) return ''
+    try {
+      const result = await window.api.readFile(filePath)
+      if (!result) return ''
+      const lines = result.content.split('\n')
+      const maxLines = 200
+      const isTruncated = lines.length > maxLines
+      const shown = lines.slice(0, maxLines).join('\n')
+      return `CURRENT FILE: ${basenameFromPath(filePath)} (${lines.length} lines)\n${shown}${isTruncated ? '\n...(file truncated, use "read" to see more)' : ''}`
+    } catch {
+      return ''
+    }
+  }
+
   const isNotebookFile = (filePath) =>
     String(filePath || '')
       .toLowerCase()
@@ -562,37 +623,330 @@ function App() {
 
     const text = String(responseText).trim()
 
-    // Try to extract JSON from code blocks ( ... )
-    const jsonBlockMatch =
-      text.match(/\`\`\`json\s*([\s\S]*?)```/i) || text.match(/```(?:json)?\s*([\s\S]*?)```/i)
-    let jsonStr = jsonBlockMatch ? jsonBlockMatch[1].trim() : text
-
-    // Try to find JSON object that starts with { and ends with }
-    const jsonObjectMatch = jsonStr.match(/\{[\s\S]*\}/)
-    if (jsonObjectMatch) {
-      jsonStr = jsonObjectMatch[0]
+    // Decode ALL HTML entities — multiple passes to handle nested/double encoding
+    let cleanText = text
+    for (let i = 0; i < 3; i++) {
+      cleanText = cleanText
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     }
 
-    try {
-      const payload = JSON.parse(jsonStr)
-      const operations = Array.isArray(payload.operations) ? payload.operations : []
-      const summary = String(payload.summary || '').trim() || 'Agent operation completed.'
+    // Try to extract JSON from fenced code blocks first (most reliable)
+    const jsonBlockMatch =
+      cleanText.match(/```json\s*([\s\S]*?)```/i) ||
+      cleanText.match(/```\s*([\s\S]*?)```/)
 
-      return {
-        operations,
-        summary
+    // Parse JSON robustly: from first { outward, trying each } backwards
+    const tryParseJson = (str) => {
+      const firstBrace = str.indexOf('{')
+      if (firstBrace < 0) return null
+      for (let i = str.length - 1; i > firstBrace; i--) {
+        if (str[i] === '}') {
+          try {
+            return { parsed: JSON.parse(str.slice(firstBrace, i + 1)), start: firstBrace, end: i + 1 }
+          } catch (e) { /* keep trying */ }
+        }
       }
-    } catch (e) {
-      console.error(
-        'Agent payload extraction failed. Input:',
-        responseText,
-        '\\nParsed Str:',
-        jsonStr,
-        '\\nError:',
-        e
-      )
       return null
     }
+
+    const result = jsonBlockMatch
+      ? tryParseJson(jsonBlockMatch[1])
+      : tryParseJson(cleanText)
+
+    if (!result) return null
+
+    const payload = result.parsed
+    const operations = Array.isArray(payload.operations) ? payload.operations : []
+    const summary = String(payload.summary || '').trim() || 'Agent operation completed.'
+
+    // Extract explanation text before/after the JSON
+    let explanation = ''
+    if (jsonBlockMatch) {
+      const before = cleanText.slice(0, jsonBlockMatch.index).trim()
+      const after = cleanText.slice(jsonBlockMatch.index + jsonBlockMatch[0].length).trim()
+      explanation = [before, after].filter(Boolean).join('\n\n')
+    } else {
+      if (result.start > 0) explanation = cleanText.slice(0, result.start).trim()
+      if (result.end < cleanText.length) {
+        const after = cleanText.slice(result.end).trim()
+        explanation = explanation ? `${explanation}\n\n${after}` : after
+      }
+    }
+
+    return { operations, summary, explanation }
+  }
+
+  // Build a clean display version of an agent response: explanation + actual code, no raw JSON.
+  // Falls back to the original responseText if parsing fails.
+  const buildAgentDisplayContent = (responseText, payload) => {
+    // If no payload was extracted, try one more time with a more lenient approach
+    if (!payload) {
+      const fallback = extractAgentPayloadFallback(responseText)
+      if (fallback && fallback.operations.length > 0) {
+        return buildAgentDisplayContent(responseText, fallback)
+      }
+      return responseText
+    }
+
+    if (payload.operations.length === 0) {
+      return payload.explanation ? `${payload.explanation}\n\n${payload.summary}` : payload.summary || responseText
+    }
+
+    const parts = []
+
+    // Natural language explanation (text before/after the JSON)
+    if (payload.explanation) {
+      parts.push(payload.explanation)
+    }
+
+    // Show actual code content from create/update operations
+    const fileOps = payload.operations.filter(op => {
+      const a = String(op?.action || '').toLowerCase()
+      return a === 'create' || a === 'update'
+    })
+    if (fileOps.length > 0) {
+      for (const op of fileOps) {
+        const content = String(op?.content || '')
+        if (content) {
+          const ext = op.path.split('.').pop().toLowerCase()
+          const langMap = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', cpp: 'cpp', c: 'c', java: 'java', html: 'html', css: 'css', json: 'json', sh: 'bash', md: 'markdown' }
+          const lang = langMap[ext] || 'text'
+          parts.push(`\`\`\`${lang}\n${content}\n\`\`\``)
+        }
+      }
+    }
+
+    // Show commands that will run
+    const execOps = payload.operations.filter(op => String(op?.action || '').toLowerCase() === 'execute')
+    if (execOps.length > 0) {
+      parts.push('**Commands to run:**')
+      execOps.forEach(op => {
+        parts.push(`\`\`\`bash\n${op.command}\n\`\`\``)
+      })
+    }
+
+    // Show read/mkdir operations as text
+    const safeOps = payload.operations.filter(op => {
+      const a = String(op?.action || '').toLowerCase()
+      return a === 'read' || a === 'mkdir'
+    })
+    if (safeOps.length > 0) {
+      parts.push('**Actions:** ' + safeOps.map(op => `${op.action}: ${op.path || ''}`).join(', '))
+    }
+
+    // Show delete operations
+    const delOps = payload.operations.filter(op => String(op?.action || '').toLowerCase() === 'delete')
+    if (delOps.length > 0) {
+      parts.push('**Delete:** ' + delOps.map(op => op.path || '').join(', '))
+    }
+
+    return parts.filter(Boolean).join('\n\n')
+  }
+
+  // Fallback: try to extract JSON with a very lenient approach
+  const extractAgentPayloadFallback = (text) => {
+    if (!text) return null
+    const t = String(text)
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+
+    // Look for { ... } containing "operations" array
+    const opsMatch = t.match(/\{[\s\S]*"operations"[\s\S]*\}/)
+    if (!opsMatch) return null
+
+    // Try to find the exact JSON by matching braces
+    const firstBrace = opsMatch[0].indexOf('{')
+    if (firstBrace < 0) return null
+
+    let depth = 0
+    for (let i = firstBrace; i < opsMatch[0].length; i++) {
+      if (opsMatch[0][i] === '{') depth++
+      if (opsMatch[0][i] === '}') {
+        depth--
+        if (depth === 0) {
+          try {
+            const jsonStr = opsMatch[0].slice(firstBrace, i + 1)
+            const parsed = JSON.parse(jsonStr)
+            if (Array.isArray(parsed.operations)) {
+              return { operations: parsed.operations, summary: parsed.summary || '', explanation: '' }
+            }
+          } catch { /* continue */ }
+        }
+      }
+    }
+    return null
+  }
+
+  // Reusable helper: makes one API call with the given messages and streams the response.
+  const callAgentApi = async (apiMessages, controller) => {
+    const systemPrompt = `You are Sam, a coding assistant built into Sam Code IDE. You can create, edit, and delete files, read directories, and run terminal commands. Keep your responses short and practical. Start with a quick summary of what you'll do, then provide the operations.
+
+WORKSPACE CONTEXT:
+- Explorer-selected folder: ${selectedFolder || 'NO_FOLDER_SELECTED'}
+- Active file: ${activePath || 'NO_ACTIVE_FILE'}
+- Workspace root: ${rootFolder || 'NO_WORKSPACE_SELECTED'}
+- Agent scope folder: ${getAgentWorkspaceScope() || 'NO_AGENT_SCOPE'}
+- Shell: PowerShell (Windows)
+${(await buildWorkspaceTree(getAgentWorkspaceScope() || rootFolder, 2).catch(() => ''))}
+${(await getActiveFileContext(activePath).catch(() => ''))}
+
+WHAT YOU CAN DO:
+- "read" - Read a file or directory listing
+- "create" - Create a new file with content
+- "update" - Overwrite an existing file with new content
+- "delete" - Delete a file or folder
+- "mkdir" - Create a directory
+- "execute" - Run a terminal command
+
+HOW TO RESPOND:
+Start with a brief, natural explanation of what you'll do. Then provide the operations in a JSON block.
+
+Example:
+"Let me check the directory first, then I'll create the files and install dependencies."
+
+\`\`\`json
+{
+  "summary": "Check directory, create project structure, install dependencies",
+  "operations": [
+    { "action": "read", "path": "." },
+    { "action": "mkdir", "path": "src" },
+    { "action": "create", "path": "src/index.js", "content": "..." },
+    { "action": "execute", "command": "npm init -y", "cwd": "." }
+  ]
+}
+\`\`\`
+
+IMPORTANT RULES:
+1. Always read a file before editing it.
+2. Keep paths relative to the workspace folder.
+3. Use PowerShell commands on Windows.
+4. Use CLI tools for scaffolding (npm create vite@latest --yes, etc.) — don't write boilerplate manually.
+5. When a command fails, propose a fix.
+6. Never output commands that require interactive input.
+7. Group related operations together.
+8. When you see the results of your previous operations, decide what to do next. If the task is complete, just say so without proposing more operations.
+
+COMMON FIXES:
+- "Module not found" → npm install the package
+- "Port already in use" → kill the process, retry
+- "Permission denied" → try with elevated privileges
+- "Command not found" → install the tool or use an alternative
+- "Syntax error" → provide corrected code
+- "npm ERR" → npm cache clean --force, then npm install
+
+RESPONSE FORMAT:
+One sentence summary, then a JSON block with "summary" and "operations". When the task is done, respond conversationally without a JSON block.`
+
+    const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
+    const requestBody = {
+      model: selectedModel,
+      messages: [{ role: 'system', content: systemPrompt }, ...apiMessages],
+      max_tokens: 4096,
+      stream: true
+    }
+
+    let responseText = ''
+    const appendChunk = (text) => { responseText += text }
+
+    async function processSSE(response, onChunk) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()
+        for (let line of lines) {
+          line = line.trim()
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') continue
+            try {
+              const parsed = JSON.parse(data)
+              const chunk = parsed?.choices?.[0]?.delta?.content ?? parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+              if (chunk) onChunk(chunk)
+            } catch (e) { /* skip malformed */ }
+          } else if (line.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(line)
+              const chunk = parsed?.message?.content ?? parsed?.response ?? ''
+              if (chunk) onChunk(chunk)
+            } catch (e) { /* skip malformed */ }
+          }
+        }
+      }
+    }
+
+    async function processAnthropicSSE(response, onChunk) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()
+        for (let line of lines) {
+          line = line.trim()
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') continue
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta' && parsed.delta.text) onChunk(parsed.delta.text)
+            } catch (e) { /* skip malformed */ }
+          }
+        }
+      }
+    }
+
+    if (effectiveProvider === 'ollama') {
+      const base = normalizeEndpointOrigin(apiKey, 'http:')
+      const resp = await fetch(`${base}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: selectedModel, messages: [{ role: 'system', content: systemPrompt }, ...apiMessages], stream: true }), signal: controller.signal })
+      if (!resp.ok) throw new Error(`Ollama returned ${resp.status}`)
+      if (resp.body) { await processSSE(resp, appendChunk) } else { const data = await resp.json(); responseText = data?.message?.content ?? data?.response ?? '' }
+    } else if (effectiveProvider === 'google') {
+      const key = String(apiKey || '').trim()
+      const url = /^https?:\/\//i.test(key) ? key : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:streamGenerateContent?key=${encodeURIComponent(key)}&alt=sse`
+      const contents = apiMessages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: String(m.content || '') }] }))
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: systemPrompt }] } }), signal: controller.signal })
+      if (!resp.ok) { const text = await resp.text().catch(() => ''); throw new Error(`Google returned ${resp.status}: ${text}`) }
+      if (resp.body) { await processSSE(resp, appendChunk) } else { const data = await resp.json(); responseText = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '' }
+    } else if (effectiveProvider === 'anthropic') {
+      const key = String(apiKey || '').trim()
+      const url = isUrl(key) ? normalizeEndpointOrigin(key) : 'https://api.anthropic.com'
+      const resp = await fetch(`${url}/v1/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'message-streaming-2023-10-16' }, body: JSON.stringify({ model: selectedModel, system: systemPrompt, messages: apiMessages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') })), max_tokens: requestBody.max_tokens, stream: true }), signal: controller.signal })
+      if (!resp.ok) { const text = await resp.text().catch(() => ''); throw new Error(`Anthropic returned ${resp.status}: ${text}`) }
+      if (resp.body) { await processAnthropicSSE(resp, appendChunk) } else { const data = await resp.json(); responseText = data?.content?.[0]?.text ?? '' }
+    } else if (effectiveProvider === 'opencode') {
+      const key = String(apiKey || '').trim()
+      const base = isUrl(key) ? normalizeEndpointOrigin(key, 'https:') : 'https://api.opencode.ai'
+      const resp = await fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(requestBody), signal: controller.signal })
+      if (!resp.ok) { const text = await resp.text().catch(() => ''); throw new Error(`OpenCode returned ${resp.status}: ${text}`) }
+      if (resp.body) { await processSSE(resp, appendChunk) } else { const data = await resp.json(); responseText = data?.choices?.[0]?.message?.content ?? '' }
+    } else {
+      const endpoint = effectiveProvider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://openrouter.ai/api/v1/chat/completions'
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
+      if (effectiveProvider === 'openrouter') { headers['HTTP-Referer'] = 'http://localhost'; headers['X-Title'] = 'Sam Code' }
+      const resp = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(requestBody), signal: controller.signal })
+      if (!resp.ok) { const text = await resp.text().catch(() => ''); throw new Error(`${effectiveProvider} returned ${resp.status}: ${text}`) }
+      if (resp.body) { await processSSE(resp, appendChunk) } else { const data = await resp.json(); responseText = data?.choices?.[0]?.message?.content ?? '' }
+    }
+
+    return responseText
   }
 
   const safeExtractJson = (text) => {
@@ -675,6 +1029,50 @@ function App() {
       )
     }
 
+    if (effectiveProvider === 'anthropic') {
+      const key = String(apiKey || '').trim()
+      const url = isUrl(key) ? normalizeEndpointOrigin(key) : 'https://api.anthropic.com'
+      const resp = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: selectedModel,
+          system: String(systemPrompt || ''),
+          messages: [{ role: 'user', content: String(userPrompt || '') }],
+          max_tokens: maxTokens
+        })
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        throw new Error(`Anthropic returned ${resp.status}: ${text}`)
+      }
+      const completion = await resp.json()
+      return completion?.content?.[0]?.text || ''
+    }
+
+    if (effectiveProvider === 'opencode') {
+      const key = String(apiKey || '').trim()
+      const base = isUrl(key) ? normalizeEndpointOrigin(key, 'https:') : 'https://api.opencode.ai'
+      const resp = await fetch(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`
+        },
+        body: JSON.stringify(requestBody)
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        throw new Error(`OpenCode returned ${resp.status}: ${text}`)
+      }
+      const completion = await resp.json()
+      return completion?.choices?.[0]?.message?.content ?? ''
+    }
+
     const endpoint =
       effectiveProvider === 'openai'
         ? 'https://api.openai.com/v1/chat/completions'
@@ -741,24 +1139,43 @@ function App() {
 
   const renderMarkdownMessage = (content) => {
     if (!content) return ''
-    let html = escapeHtml(content)
 
-    html = html.replace(/(\w+)?\n([\s\S]*?)/g, (match, lang = 'plaintext', code) => {
-      const language = String(lang || 'plaintext').toLowerCase()
-      const highlighted = hljs.getLanguage(language)
-        ? hljs.highlight(code, { language }).value
-        : hljs.highlightAuto(code, ['java', 'python', 'c', 'cpp']).value
-      return `<pre class="rounded-xl bg-slate-950 p-3 overflow-x-auto"><code class="hljs language-${escapeHtml(language)}">${highlighted}</code></pre>`
+    // 1. Extract fenced code blocks FIRST (before HTML escaping)
+    const codeBlocks = []
+    let text = String(content)
+    text = text.replace(/```(\w+)?\n?([\s\S]*?)```/g, (match, lang, code) => {
+      const idx = codeBlocks.length
+      codeBlocks.push({ lang: String(lang || 'plaintext').trim(), code: code.trim() })
+      return `%%CODE_BLOCK_${idx}%%`
     })
 
-    html = html.replace(
+    // 2. Escape HTML for the remaining text
+    text = escapeHtml(text)
+
+    // 3. Restore code blocks with syntax highlighting
+    text = text.replace(/%%CODE_BLOCK_(\d+)%%/g, (_, idx) => {
+      const block = codeBlocks[Number(idx)]
+      if (!block) return ''
+      const language = block.lang.toLowerCase()
+      const highlighted = hljs.getLanguage(language)
+        ? hljs.highlight(block.code, { language }).value
+        : hljs.highlightAuto(block.code, ['javascript', 'python', 'c', 'cpp', 'java', 'typescript', 'bash', 'json']).value
+      return `<pre class="rounded-xl bg-slate-950 p-3 overflow-x-auto text-sm"><code class="hljs language-${escapeHtml(language)}">${highlighted}</code></pre>`
+    })
+
+    // 4. Inline code
+    text = text.replace(
       /`([^`]+)`/g,
       '<code class="inline-code rounded bg-white/10 px-1 text-xs text-cyan-100">$1</code>'
     )
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    html = html.replace(/\n/g, '<br/>')
-    return html
+
+    // 5. Bold and italic
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+    // 6. Newlines
+    text = text.replace(/\n/g, '<br/>')
+    return text
   }
 
   const runSyntaxCheck = async () => {
@@ -3476,6 +3893,10 @@ rem Script generated for ${fileName}
       return `${action === 'create' ? 'Create' : 'Update'} file: ${path}`
     }
 
+    if (action === 'read') {
+      return `Read: ${path}`
+    }
+
     return `${action || 'unknown'}: ${path || 'unknown path'}`
   }
 
@@ -3483,9 +3904,26 @@ rem Script generated for ${fileName}
     if (!Array.isArray(operations)) return -1
 
     for (let index = Math.max(0, startIndex); index < operations.length; index += 1) {
-      if (String(operations[index]?.action || '').toLowerCase() === 'execute') {
+      const action = String(operations[index]?.action || '').toLowerCase()
+      if (action === 'execute' || action === 'update' || action === 'create' || action === 'write' || action === 'upsert' || action === 'delete') {
         return index
       }
+    }
+
+    return -1
+  }
+
+  const findNextIndexRequiringApproval = (operations, startIndex = 0) => {
+    if (!Array.isArray(operations)) return -1
+
+    for (let index = Math.max(0, startIndex); index < operations.length; index += 1) {
+      const action = String(operations[index]?.action || '').toLowerCase()
+      // Safe ops that don't need approval: read, mkdir
+      if (action === 'read' || action === 'mkdir') {
+        continue
+      }
+      // Everything else needs approval
+      return index
     }
 
     return -1
@@ -3496,7 +3934,10 @@ rem Script generated for ${fileName}
 
     return operations
       .slice(Math.max(0, startIndex))
-      .filter((operation) => String(operation?.action || '').toLowerCase() !== 'execute')
+      .filter((operation) => {
+        const action = String(operation?.action || '').toLowerCase()
+        return action !== 'execute' && action !== 'read' && action !== 'mkdir'
+      })
   }
 
   const generateRecoveryCommand = (error, originalCommand) => {
@@ -3925,6 +4366,11 @@ rem Script generated for ${fileName}
 
     for (let index = 0; index < operations.length; index += 1) {
       const operation = operations[index]
+      const action = String(operation?.action || '').toLowerCase()
+      // Skip safe ops — already auto-executed before approval flow
+      if (action === 'read' || action === 'mkdir') {
+        continue
+      }
       if (!isExecuteAction(operation)) {
         pendingFileOperations.push(operation)
         continue
@@ -3972,10 +4418,53 @@ rem Script generated for ${fileName}
   const approvePendingAgentProposal = async () => {
     if (!pendingAgentProposal || approvalBusy) return
 
+    const loopCtx = agentLoopResumeRef.current
+
     setApprovalBusy(true)
     pushActivity('info', 'Approved agent proposal. Executing requested workspace changes.')
     try {
-      const resultMessage = await executeApprovedAgentOperationsSequential(pendingAgentProposal)
+      let resultMessage
+
+      // When in an agent loop, safe ops were already auto-executed.
+      // Only execute the ops that needed approval to avoid duplicates.
+      if (loopCtx) {
+        const approvalOps = loopCtx.needsApprovalOps || pendingAgentProposal.operations
+        if (approvalOps.length > 0) {
+          const result = await window.api.applyAgentOperations({
+            rootFolder: loopCtx.agentWorkspaceRoot,
+            operations: approvalOps
+          })
+
+          const applied = Array.isArray(result?.applied) ? result.applied : []
+          const failed = Array.isArray(result?.failed) ? result.failed : []
+
+          if (loopCtx.agentWorkspaceRoot) await loadDirectory(loopCtx.agentWorkspaceRoot)
+
+          const lines = []
+          if (applied.length > 0) {
+            lines.push(`**Applied ${applied.length} operation(s):**`)
+            applied.slice(0, 10).forEach(op => {
+              lines.push(`- ${op.action}: ${op.path || op.command || 'success'}`)
+            })
+          }
+          if (failed.length > 0) {
+            lines.push(`**Failed ${failed.length} operation(s):**`)
+            failed.slice(0, 5).forEach(op => {
+              lines.push(`- ${op.action || 'unknown'} ${op.path || ''}: ${op.reason || 'error'}`)
+            })
+          }
+          if (applied.length === 0 && failed.length === 0) {
+            lines.push('No changes were applied.')
+          }
+          resultMessage = lines.join('\n\n')
+        } else {
+          resultMessage = 'All safe operations were already completed.'
+        }
+      } else {
+        // Not in a loop — use the full execution path
+        resultMessage = await executeApprovedAgentOperationsSequential(pendingAgentProposal)
+      }
+
       setMessages((current) => [
         ...current,
         {
@@ -3986,7 +4475,18 @@ rem Script generated for ${fileName}
       ])
       setPendingAgentProposal(null)
       setPendingAgentStepIndex(0)
+
+      // If we're in the middle of an agent loop, resume it with the results
+      if (loopCtx) {
+        agentLoopResumeRef.current = null
+        loopCtx.loopMessages.push({ role: 'assistant', content: resultMessage })
+        setStatus('Executing approved actions — continuing agent loop...')
+        await resumeAgentLoop(loopCtx)
+        return
+      }
+
       setStatus('Agent finished all approved steps.')
+      pushActivity('success', 'Agent round complete. Type your next request or click Send for the agent to continue.')
     } catch (error) {
       const message = String(error?.message || error)
       setStatus(`Agent approval failed: ${message}`)
@@ -4007,6 +4507,24 @@ rem Script generated for ${fileName}
   const skipPendingAgentProposal = () => {
     if (!pendingAgentProposal) return
 
+    // If we're in an agent loop, skip and resume the loop with a skip note
+    const loopCtx = agentLoopResumeRef.current
+    if (loopCtx) {
+      agentLoopResumeRef.current = null
+      pushActivity('warning', 'Skipped this agent proposal — continuing loop.')
+      // Add a skip note to loop messages so the model knows operations were skipped
+      loopCtx.loopMessages.push({ role: 'user', content: `The following operations were skipped: ${pendingAgentProposal.summary || 'agent proposal'}. Decide if there's an alternative approach.` })
+      setMessages((current) => [
+        ...current,
+        { role: 'assistant', kind: 'chat', content: `Skipped: ${pendingAgentProposal.summary || 'Agent proposal'}` }
+      ])
+      setPendingAgentProposal(null)
+      setPendingAgentStepIndex(0)
+      // Resume the loop
+      resumeAgentLoop(loopCtx)
+      return
+    }
+
     pushActivity('warning', 'Skipped the agent proposal.')
     setMessages((current) => [
       ...current,
@@ -4021,6 +4539,7 @@ rem Script generated for ${fileName}
   }
 
   const sendMessage = async () => {
+    // When a proposal is pending, "Send" steps through remaining execute operations.
     if (pendingAgentProposal) {
       const operations = Array.isArray(pendingAgentProposal.operations)
         ? pendingAgentProposal.operations
@@ -4056,412 +4575,557 @@ rem Script generated for ${fileName}
       return
     }
 
-    const userMessage = { role: 'user', content: input.trim() }
-    const nextMessages = [...messages, userMessage]
-    setMessages(nextMessages)
-    setInput('')
-    setSending(true)
-    setStatus('Loading response...')
-    pushActivity('info', `Thinking about a response for ${selectedModel}.`)
-    pushActivity('info', 'Preparing prompt and workspace context.')
+    // Non-agent mode: single call, no loop
+    if (mode !== 'agent') {
+      const userMessage = { role: 'user', content: input.trim() }
+      const nextMessages = [...messages, userMessage]
+      setMessages(nextMessages)
+      setInput('')
+      setSending(true)
+      setStatus('Loading response...')
+      pushActivity('info', `Thinking about a response for ${selectedModel}.`)
 
-    try {
-      let systemPrompt = 'You are Sam, a concise coding assistant.'
-      if (mode === 'agent') {
-        const agentWorkspaceScope = getAgentWorkspaceScope()
-        systemPrompt += `
-    You are an AUTONOMOUS coding agent in Sam Code IDE. You work ONLY in the folder currently selected in the Explorer, or the active file's folder if nothing is selected.
+      try {
+        const controller = new AbortController()
+        generationAbortRef.current = controller
 
-WORKSPACE CONTEXT:
-    - Explorer-selected folder: ${selectedFolder || 'NO_FOLDER_SELECTED'}
-- Active file: ${activePath || 'NO_ACTIVE_FILE'}
-    - Workspace root: ${rootFolder || 'NO_WORKSPACE_SELECTED'}
-    - Agent scope folder: ${agentWorkspaceScope || 'NO_AGENT_SCOPE'}
-- Shell: PowerShell (Windows)
+        const systemPrompt = `You are Sam. You are a friendly, knowledgeable coding assistant who talks naturally — like a helpful colleague. Keep responses short and practical. When someone asks for code, just give them the code with a brief explanation. No fluff, no refusals — if you can't execute something directly, provide the code and instructions. Speak casually, not formally. Skip the preamble and get straight to the point.`
 
-    IMPORTANT: Do not run project scaffolding, installs, or file changes in the workspace root unless the selected folder is the workspace root. Use the agent scope folder as cwd and as the base for relative paths.
-    Use PowerShell-native commands whenever possible. For example, use Get-ChildItem -Force or dir instead of ls -la on Windows PowerShell.
-    Keep your language professional, clear, and user-friendly. Avoid repeating terminal command wrappers, raw ANSI sequences, or low-level shell noise in the final user-facing response.
-
-YOUR AUTONOMOUS OPERATING LOOP - ALWAYS FOLLOW THIS PATTERN:
-
-[STEP 1] THINK: Analyze the user request and the workspace context. What is missing? What are the dependencies? What files and commands are required?
-
-[STEP 2] PLAN: Formulate a multi-step strategy and narrate it with [STEP N/M] prefixes before doing anything. Do not write or execute complex changes until the plan is clear.
-
-[STEP 3] ACT: Execute the plan in a single coherent set of operations. Use relative paths, the selected folder scope, and only proceed after the strategy is complete.
-
-[STEP 4] OBSERVE: Inspect the result of each action. If a command fails, analyze the error output, fix the root cause, and retry. Do not move on until the result is validated.
-
-[STEP 5] ITERATE: Repeat THINK ➔ PLAN ➔ ACT ➔ OBSERVE for every user request. If an operation still fails, diagnose the new failure and continue until success or a genuine blocker is reached.
-
-ERROR RECOVERY PATTERNS YOU KNOW:
-- "ModuleNotFoundError" or "Cannot find module": Run npm install or pip install to get missing dependency
-- "Address already in use" (EADDRINUSE): Kill process on that port or use a different port
-- "Permission denied" (EPERM): Try with elevated privileges, change file permissions, or use alternative approach
-- "command not found": Check PATH, install the tool, or use alternative command
-- "SyntaxError" or "Unexpected token": Provide corrected code and re-apply
-- "npm ERR": Clear npm cache (npm cache clean --force) and retry
-- "Connection refused" (ECONNREFUSED): Verify service is running, check hostname/port
-- "Timeout": Increase timeout value, check network, or retry operation
-
-RESPONSE FORMAT - JSON ONLY:
-When you have a plan and operations ready, respond ONLY with a single JSON object. If you cannot complete the request, still output valid JSON with an empty operations array and a summary explaining why. Do not include any additional commentary outside the JSON object. Use only keys: summary and operations.
-
-The JSON object must exactly follow this structure:
-{
-  "summary": "[STEP N/M] Description of what this accomplishes",
-  "operations": [
-    { "action": "execute", "command": "command for step 1", "cwd": "optional" },
-    { "action": "create", "path": "file/path.js", "content": "file content" },
-    { "action": "execute", "command": "command for step 2", "cwd": "optional" },
-    { "action": "update", "path": "file/path.js", "content": "updated content" }
-  ]
-}
-
-KEY RULES:
-1. Include narration in summaries: "npm install express | Create server.js | Run npm start"
-2. Combine execution and file operations intelligently (install deps, create files, run tests)
-3. Never propose the same failing command twice - always fix the root cause
-4. File operations are auto-applied; terminal commands require user approval ONCE (not for recovery steps)
-5. Use your error patterns to self-heal without asking the user
-6. If a command needs elevated privileges, explain why and provide alternatives first
-7. For any operation, validate success with concrete checks (file exists, command output, exit code 0)
-8. Keep operations sequential and logical - install before use, create before modify, test after build
-9. Use platform-aware commands (PowerShell on Windows, bash on Unix)
-10. Include helpful context: "Installing 5 packages...", "Creating React component...", etc.
-11. NEVER try to output large built-in boilerplates (like a full React template) manually. ALWAYS use standard CLI scaffolding tools (e.g.
-pm create vite@latest --yes,
-px create-react-app --yes).
-12. NEVER output commands that prompt for interactive user input. ALWAYS use --yes, --force, or equivalent flags.
-
-EXAMPLES OF GOOD AUTONOMOUS RESPONSES:
-
-Example 1 - Self-healing on module error:
-\`\`\`json
-{
-  "summary": "[STEP 1/2] Install missing dependencies | [STEP 2/2] Run the application",
-  "operations": [
-    { "action": "execute", "command": "npm install express body-parser", "cwd": "." },
-    { "action": "execute", "command": "npm start", "cwd": "." }
-  ]
-}
-\`\`\`
-
-Example 2 - Complex multi-step task with narration:
-\`\`\`json
-{
-  "summary": "[STEP 1/4] Create directories | [STEP 2/4] Create component files | [STEP 3/4] Update imports | [STEP 4/4] Verify with npm test",
-  "operations": [
-    { "action": "mkdir", "path": "src/components/Button" },
-    { "action": "create", "path": "src/components/Button/Button.jsx", "content": "..." },
-    { "action": "create", "path": "src/components/Button/Button.css", "content": "..." },
-    { "action": "update", "path": "src/App.jsx", "content": "..." },
-    { "action": "execute", "command": "npm test", "cwd": "." }
-  ]
-}
-\`\`\`
-
-Example 3 - Port conflict resolution (autonomous):
-If npm start fails with "EADDRINUSE", automatically retry with:
-\`\`\`json
-{
-  "summary": "[STEP 1/2] Kill process on port 3000 | [STEP 2/2] Restart application",
-  "operations": [
-    { "action": "execute", "command": "$ProcessOnPort = Get-NetTCPConnection -LocalPort 3000 | Select-Object -ExpandProperty OwningProcess; Stop-Process -Id $ProcessOnPort -Force", "cwd": "." },
-    { "action": "execute", "command": "npm start", "cwd": "." }
-  ]
-}
-\`\`\`
-
-REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission to fix errors. User only approves the PLAN, not individual recovery steps.
-`
-      }
-
-      // Use fetch with AbortController so the UI Stop button can cancel the in-flight request.
-      const controller = new AbortController()
-      generationAbortRef.current = controller
-      const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
-
-      const requestBody = {
-        model: selectedModel,
-        messages: [{ role: 'system', content: systemPrompt }, ...nextMessages],
-        max_tokens: Math.min(4096, mode === 'agent' ? 4096 : 2048),
-        stream: true
-      }
-
-      let responseText = ''
-      const streamMessageId = 'stream_' + Date.now()
-
-      if (mode !== 'agent') {
+        let responseText = ''
+        const streamMessageId = 'stream_' + Date.now()
         setStatus('Thinking...')
         setMessages((current) => [
           ...current,
           { id: streamMessageId, role: 'assistant', kind: 'chat', content: '' }
         ])
-      }
 
-      const appendChunk = (text) => {
-        responseText += text
-        if (mode !== 'agent') {
+        const appendChunk = (text) => {
+          responseText += text
           setMessages((current) =>
             current.map((m) => (m.id === streamMessageId ? { ...m, content: responseText } : m))
           )
         }
-      }
 
-      async function processSSE(response, onChunk) {
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop()
-          for (let line of lines) {
-            line = line.trim()
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6)
-              if (data === '[DONE]') continue
-              try {
-                const parsed = JSON.parse(data)
-                // OpeaAI / OpenRouter / Google SSE extraction
-                const chunk =
-                  parsed?.choices?.[0]?.delta?.content ??
-                  parsed?.candidates?.[0]?.content?.parts?.[0]?.text ??
-                  ''
-                if (chunk) onChunk(chunk)
-              } catch (e) {
-                // Malformed SSE line is expected during streaming, safe to skip
-              }
-            } else if (line.startsWith('{')) {
-              try {
-                const parsed = JSON.parse(line)
-                const chunk = parsed?.message?.content ?? parsed?.response ?? ''
-                if (chunk) onChunk(chunk)
-              } catch (e) {
-                // Malformed JSON line is expected during streaming, safe to skip
-              }
-            }
-          }
-        }
-      }
+        const apiMessages = [{ role: 'system', content: systemPrompt }, ...nextMessages]
+        const response = await callAgentApi(nextMessages, controller)
+        responseText = response
 
-      if (effectiveProvider === 'ollama') {
-        const base = normalizeEndpointOrigin(apiKey, 'http:')
-        const resp = await fetch(`${base}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: selectedModel,
-            messages: [{ role: 'system', content: systemPrompt }, ...nextMessages],
-            stream: true
-          }),
-          signal: controller.signal
-        })
-        if (!resp.ok) throw new Error(`Ollama returned ${resp.status}`)
-        await processSSE(resp, appendChunk)
-      } else if (effectiveProvider === 'google') {
-        const key = String(apiKey || '').trim()
-        const url = /^https?:\/\//i.test(key)
-          ? key
-          : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:streamGenerateContent?key=${encodeURIComponent(key)}&alt=sse`
-        const contents = nextMessages.map((message) => ({
-          role: message.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: String(message.content || '') }]
-        }))
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents,
-            systemInstruction: { parts: [{ text: systemPrompt }] }
-          }),
-          signal: controller.signal
-        })
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => '')
-          throw new Error(`Google returned ${resp.status}: ${text}`)
-        }
-        await processSSE(resp, appendChunk)
-      } else {
-        const endpoint =
-          effectiveProvider === 'openai'
-            ? 'https://api.openai.com/v1/chat/completions'
-            : 'https://openrouter.ai/api/v1/chat/completions'
-        const headers = {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
-        }
-        if (effectiveProvider === 'openrouter') {
-          headers['HTTP-Referer'] = 'http://localhost'
-          headers['X-Title'] = 'Sam Code'
-        }
-        const resp = await fetch(endpoint, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
-          signal: controller.signal
-        })
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => '')
-          throw new Error(`${effectiveProvider} returned ${resp.status}: ${text}`)
-        }
-        await processSSE(resp, appendChunk)
-      }
-
-      pushActivity('success', 'AI response received.')
-
-      if (mode === 'agent') {
-        const payload = extractAgentPayload(responseText)
-        if (!payload) {
-          setStatus('Agent responded, but no valid JSON operations were found.')
-          pushActivity('warning', 'Agent response did not include valid JSON operations.')
-          setMessages((current) => [
-            ...current,
-            {
-              role: 'assistant',
-              content:
-                'I could not execute changes because the model did not return a valid operation payload. Please ask me to create files, modify content, or run commands in a structured way. For example, you can ask me to "Create a new React component called Button.jsx", "Update the App.js file to include a header", or "Run npm install to install dependencies". I need you to be specific about what files you want me to create or modify, or what commands you want me to run.'
-            }
-          ])
-        } else if (!rootFolder) {
-          setStatus('Open a folder first so the agent can apply file operations.')
-          pushActivity('warning', 'Agent operations skipped because no workspace folder is open.')
-          setMessages((current) => [
-            ...current,
-            {
-              role: 'assistant',
-              content:
-                'Open a workspace folder first, then I can create/update/delete files for you.'
-            }
-          ])
-        } else if (payload.operations.length === 0) {
-          setStatus(payload.summary || 'Agent finished with no file changes.')
-          pushActivity('info', 'Agent finished with no file changes.')
-          setMessages((current) => [
-            ...current,
-            {
-              role: 'assistant',
-              content: payload.summary || 'No workspace changes were needed.'
-            }
-          ])
-        } else {
-          const firstExecuteIndex = findNextExecuteIndex(payload.operations, 0)
-
-          if (firstExecuteIndex === -1) {
-            setPendingAgentProposal(null)
-            setPendingAgentStepIndex(0)
-            try {
-              const fileResultMessage = await executeApprovedAgentOperationsSequential(payload)
-              setMessages((current) => [
-                ...current,
-                { role: 'assistant', kind: 'chat', content: fileResultMessage }
-              ])
-            } catch (error) {
-              const message = String(error?.message || error)
-              setStatus(`Agent file changes failed: ${message}`)
-              pushActivity('error', `Agent file changes failed: ${message}`)
-              setMessages((current) => [
-                ...current,
-                {
-                  role: 'assistant',
-                  kind: 'chat',
-                  content: `Error applying file changes: ${message}`
-                }
-              ])
-            }
-          } else {
-            setPendingAgentProposal(payload)
-            setPendingAgentStepIndex(firstExecuteIndex)
-            setStatus('Review the next command and allow or skip it.')
-            pushActivity(
-              'info',
-              `Agent proposed ${payload.operations.length} action(s) for stepwise execution.`
-            )
-            setMessages((current) => [
-              ...current,
-              {
-                role: 'assistant',
-                kind: 'approval',
-                operationIndex: firstExecuteIndex,
-                operations: payload.operations,
-                summary:
-                  payload.summary ||
-                  'I prepared the first command. Review and choose Allow or Skip.'
-              }
-            ])
-          }
-        }
-      } else {
         setStatus('Chat response received.')
         setMessages((current) => [
           ...current,
-          { role: 'assistant', kind: 'chat', content: responseText }
+          { role: 'assistant', kind: 'chat', content: buildAgentDisplayContent(responseText, null) }
         ])
-      }
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        // generation was cancelled by user
-        setStatus('Generation aborted.')
-        pushActivity('warning', 'Generation was cancelled.')
-        setMessages((current) => [
-          ...current,
-          { role: 'assistant', content: 'Generation aborted.' }
-        ])
-      } else {
-        console.error(error)
-        setMessages((current) => [
-          ...current,
-          { role: 'assistant', content: 'Error: ' + error.message }
-        ])
-        if (error?.status === 429) {
-          const retryAfter = Number(error?.headers?.['retry-after'] || 15)
-          const cooldownMs = Number.isFinite(retryAfter) ? Math.max(5, retryAfter) * 1000 : 15000
-          setRateLimitedUntil(Date.now() + cooldownMs)
-          setStatus(`OpenRouter rate limit hit (429). Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
-          pushActivity(
-            'warning',
-            `Rate limited (429). Waiting ${Math.ceil(cooldownMs / 1000)}s before retry.`
-          )
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          setStatus('Generation aborted.')
+          pushActivity('warning', 'Generation was cancelled.')
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: 'Generation aborted.' }
+          ])
         } else {
-          // Provide more actionable feedback for connection errors
-          const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
-          let attempted = ''
-          try {
-            if (effectiveProvider === 'ollama') {
-              attempted = normalizeEndpointOrigin(apiKey, 'http:')
-            } else if (effectiveProvider === 'google') {
-              attempted = String(apiKey || '').trim()
-            } else {
-              attempted =
-                effectiveProvider === 'openai' ? 'https://api.openai.com' : 'https://openrouter.ai'
-            }
-          } catch {
-            attempted = ''
-          }
-
-          const brief = String(error?.message || error)
-          if (
-            brief.includes('Failed to fetch') ||
-            brief.includes('NetworkError') ||
-            brief.includes('ECONNREFUSED')
-          ) {
-            setStatus(
-              `Connection refused when contacting ${attempted || 'the API'}. Is the provider running?`
-            )
-            pushActivity('error', `Connection refused: ${attempted || 'API endpoint'}`)
+          console.error(error)
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: 'Error: ' + error.message }
+          ])
+          if (error?.status === 429) {
+            const retryAfter = Number(error?.headers?.['retry-after'] || 15)
+            const cooldownMs = Number.isFinite(retryAfter) ? Math.max(5, retryAfter) * 1000 : 15000
+            setRateLimitedUntil(Date.now() + cooldownMs)
+            setStatus(`OpenRouter rate limit hit (429). Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
+            pushActivity('warning', `Rate limited (429). Waiting ${Math.ceil(cooldownMs / 1000)}s before retry.`)
           } else {
-            setStatus('Request failed. Check your API key and network connection.')
-            pushActivity('error', `Request failed: ${brief}`)
+            const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
+            let attempted = ''
+            try {
+              if (effectiveProvider === 'ollama') attempted = normalizeEndpointOrigin(apiKey, 'http:')
+              else if (effectiveProvider === 'google') attempted = String(apiKey || '').trim()
+              else attempted = effectiveProvider === 'openai' ? 'https://api.openai.com' : 'https://openrouter.ai'
+            } catch { attempted = '' }
+            const brief = String(error?.message || error)
+            if (brief.includes('Failed to fetch') || brief.includes('NetworkError') || brief.includes('ECONNREFUSED')) {
+              setStatus(`Connection refused when contacting ${attempted || 'the API'}. Is the provider running?`)
+              pushActivity('error', `Connection refused: ${attempted || 'API endpoint'}`)
+            } else {
+              setStatus('Request failed. Check your API key and network connection.')
+              pushActivity('error', `Request failed: ${brief}`)
+            }
           }
         }
+      } finally {
+        generationAbortRef.current = null
+        setSending(false)
       }
-    } finally {
-      generationAbortRef.current = null
-      setSending(false)
+      return
+    }
+
+    // === AGENT MODE: continuous execute → feed results back → repeat loop ===
+    const userInput = input.trim()
+    const userMessage = { role: 'user', content: userInput }
+    const loopMessages = [...messages, userMessage]
+    setMessages(loopMessages)
+    setInput('')
+    setSending(true)
+    setStatus('Agent loop starting...')
+    pushActivity('info', `Agent loop started for: ${userInput}`)
+
+    const MAX_ROUNDS = 12
+    let round = 0
+    let loopAborted = false
+
+    while (round < MAX_ROUNDS && !loopAborted) {
+      round++
+      setStatus(`Agent round ${round}/${MAX_ROUNDS} — thinking...`)
+
+      let responseText = ''
+      const streamMessageId = 'stream_' + Date.now()
+
+      // Show streaming response in a temporary message
+      setMessages((current) => [
+        ...current,
+        { id: streamMessageId, role: 'assistant', kind: 'chat', content: '' }
+      ])
+
+      try {
+        const controller = new AbortController()
+        generationAbortRef.current = controller
+
+        responseText = await callAgentApi(loopMessages, controller)
+
+        // Update the streaming message with final text
+        pushActivity('success', `Agent round ${round} response received.`)
+        const payload = extractAgentPayload(responseText)
+        setMessages((current) =>
+          current.map((m) => (m.id === streamMessageId ? { ...m, content: buildAgentDisplayContent(responseText, payload) } : m))
+        )
+
+        if (!payload || payload.operations.length === 0) {
+          // No more operations — the agent is done or just chatting
+          setStatus(`Agent finished after ${round} round(s).`)
+          pushActivity('info', `Agent finished after ${round} round(s).`)
+          if (!payload) {
+            // Purely conversational response — already shown via streamMessageId
+          } else {
+            setMessages((current) => [
+              ...current.filter(m => m.id !== streamMessageId),
+              { role: 'assistant', kind: 'chat', content: buildAgentDisplayContent(responseText, payload) }
+            ])
+          }
+          break // exit the loop
+        }
+
+        if (!rootFolder) {
+          setStatus('Open a folder first so the agent can apply file operations.')
+          pushActivity('warning', 'Agent operations skipped because no workspace folder is open.')
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            { role: 'assistant', content: 'Open a workspace folder first, then I can create/update/delete files for you.' }
+          ])
+          break
+        }
+
+        const agentWorkspaceRoot = getAgentWorkspaceScope()
+        if (!agentWorkspaceRoot) {
+          setStatus('Open a folder first so the agent can apply file operations.')
+          pushActivity('warning', 'Agent operations skipped because no workspace folder is open.')
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            { role: 'assistant', content: 'Open a workspace folder first, then I can create/update/delete files for you.' }
+          ])
+          break
+        }
+
+        // Separate safe operations (read, mkdir) from ones needing approval
+        const safeOps = payload.operations.filter((op) => {
+          const action = String(op?.action || '').toLowerCase()
+          return action === 'read' || action === 'mkdir'
+        })
+        const needsApprovalOps = payload.operations.filter((op) => {
+          const action = String(op?.action || '').toLowerCase()
+          return action !== 'read' && action !== 'mkdir'
+        })
+
+        let safeResults = []
+        let readFileContents = []
+
+        // Auto-execute safe operations
+        if (safeOps.length > 0) {
+          setStatus(`Executing ${safeOps.length} safe operation(s)...`)
+          const safeResult = await window.api.applyAgentOperations({
+            rootFolder: agentWorkspaceRoot,
+            operations: safeOps
+          })
+          if (Array.isArray(safeResult?.applied)) {
+            for (const applied of safeResult.applied) {
+              if (applied.action === 'read') {
+                if (applied.content !== null && applied.content !== undefined) {
+                  const maxShow = 3000
+                  const truncated = applied.content.length > maxShow
+                  readFileContents.push({
+                    path: applied.path,
+                    content: truncated ? applied.content.slice(0, maxShow) + '\n...(truncated)' : applied.content
+                  })
+                  safeResults.push(`Read "${basenameFromPath(applied.path)}" (${(applied.size / 1024).toFixed(1)}KB)`)
+                } else if (Array.isArray(applied.directory)) {
+                  const listing = applied.directory
+                    .map((entry) => `${entry.isDirectory ? '📁' : '📄'} ${entry.name}`)
+                    .join('\n')
+                  readFileContents.push({
+                    path: applied.path,
+                    content: `Directory listing (${applied.directory.length} items):\n${listing}`
+                  })
+                  safeResults.push(`Read directory "${basenameFromPath(applied.path)}"`)
+                }
+              } else if (applied.action === 'mkdir') {
+                safeResults.push(`Created directory "${basenameFromPath(applied.path)}"`)
+              }
+            }
+          }
+          if (agentWorkspaceRoot) await loadDirectory(agentWorkspaceRoot)
+        }
+
+        // Build the result text to feed back to the model
+        const buildRoundResult = () => {
+          const parts = []
+
+          if (readFileContents.length > 0) {
+            parts.push('**Files read:**')
+            parts.push(readFileContents.map(f => `--- ${basenameFromPath(f.path)} ---\n${f.content}`).join('\n\n'))
+          }
+
+          if (safeResults.length > 0) {
+            parts.push(`**Safe operations completed:** ${safeResults.join('. ')}.`)
+          }
+
+          if (needsApprovalOps.length > 0) {
+            parts.push(`**Operations awaiting approval:** ${needsApprovalOps.map(op => `${op.action}: ${op.path || op.command || ''}`).join(', ')}`)
+          }
+
+          return parts.join('\n\n')
+        }
+
+        // If ALL operations were safe — no approval needed, feed results back and continue loop
+        if (needsApprovalOps.length === 0) {
+          setPendingAgentProposal(null)
+          setPendingAgentStepIndex(0)
+
+          const resultText = buildRoundResult()
+
+          // Replace the streaming message with a proper result message, then add the result as user context
+          setMessages((current) => {
+            const filtered = current.filter(m => m.id !== streamMessageId)
+            return [
+              ...filtered,
+              { role: 'assistant', kind: 'chat', content: payload.explanation ? `${payload.explanation}\n\n${resultText}` : resultText }
+            ]
+          })
+
+          // Add the round result as a user message so the model sees the output and can continue
+          loopMessages.push({ role: 'assistant', content: responseText })
+          loopMessages.push({ role: 'user', content: `Here are the results of your last actions:\n\n${resultText}\n\nIf there's more to do, provide the next set of operations. If the task is complete, just say so.` })
+
+          setStatus(`Round ${round} done — continuing...`)
+          continue // go to next round
+        }
+
+        // There are operations needing approval — pause the loop
+        setPendingAgentProposal(payload)
+        setPendingAgentStepIndex(0)
+        const safeMsg = safeResults.length > 0 ? ` (already executed: ${safeResults.join(', ')})` : ''
+        setStatus(`Review the next action.`)
+        pushActivity('info', `Agent proposed ${needsApprovalOps.length} action(s) requiring approval.${safeMsg}`)
+
+        // Replace streaming message with the approval message
+        setMessages((current) => [
+          ...current.filter(m => m.id !== streamMessageId),
+          {
+            role: 'assistant',
+            kind: 'approval',
+            operationIndex: 0,
+            operations: needsApprovalOps,
+            summary: payload.summary || 'I prepared some changes. Review and choose Allow or Skip.',
+            explanation: payload.explanation || ''
+          }
+        ])
+
+        // Pause the loop — user will click Allow/Skip or Send to continue
+        // The loop state (round, loopMessages) stays active via closure
+        // We need a way to resume after approval. We'll use a ref.
+        return new Promise((resolve) => {
+          agentLoopResumeRef.current = {
+            resolve,
+            payload,
+            safeResults,
+            readFileContents,
+            needsApprovalOps,
+            round,
+            MAX_ROUNDS,
+            loopMessages,
+            agentWorkspaceRoot
+          }
+        })
+
+      } catch (error) {
+        // Remove the streaming message on error
+        setMessages((current) => current.filter(m => m.id !== streamMessageId))
+
+        if (error?.name === 'AbortError') {
+          loopAborted = true
+          setStatus('Agent loop aborted.')
+          pushActivity('warning', 'Agent loop was cancelled.')
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: 'Agent loop was aborted.' }
+          ])
+        } else {
+          console.error(error)
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: `Error in round ${round}: ${error.message}` }
+          ])
+          if (error?.status === 429) {
+            const retryAfter = Number(error?.headers?.['retry-after'] || 15)
+            const cooldownMs = Number.isFinite(retryAfter) ? Math.max(5, retryAfter) * 1000 : 15000
+            setRateLimitedUntil(Date.now() + cooldownMs)
+            setStatus(`Rate limited (429). Retry in ${Math.ceil(cooldownMs / 1000)}s.`)
+            pushActivity('warning', `Rate limited (429). Waiting ${Math.ceil(cooldownMs / 1000)}s before retry.`)
+          } else {
+            const effectiveProvider = getEffectiveProvider(apiKey, apiProvider)
+            let attempted = ''
+            try {
+              if (effectiveProvider === 'ollama') attempted = normalizeEndpointOrigin(apiKey, 'http:')
+              else if (effectiveProvider === 'google') attempted = String(apiKey || '').trim()
+              else attempted = effectiveProvider === 'openai' ? 'https://api.openai.com' : 'https://openrouter.ai'
+            } catch { attempted = '' }
+            const brief = String(error?.message || error)
+            if (brief.includes('Failed to fetch') || brief.includes('NetworkError') || brief.includes('ECONNREFUSED')) {
+              setStatus(`Connection refused when contacting ${attempted || 'the API'}. Is the provider running?`)
+              pushActivity('error', `Connection refused: ${attempted || 'API endpoint'}`)
+            } else {
+              setStatus(`Request failed in round ${round}. Check your API key and network connection.`)
+              pushActivity('error', `Request failed: ${brief}`)
+            }
+          }
+          // On error, break the loop
+          break
+        }
+      }
+    }
+
+    // Cleanup after loop
+    if (round >= MAX_ROUNDS) {
+      setStatus(`Agent reached max rounds (${MAX_ROUNDS}). Type more instructions to continue.`)
+      pushActivity('warning', `Agent reached max rounds (${MAX_ROUNDS}).`)
+    }
+    generationAbortRef.current = null
+    setSending(false)
+  }
+
+  // Resume the agent loop after a proposal is approved.
+  // When called from approvePendingAgentProposal, the result is already in loopMessages.
+  const resumeAgentLoop = async (approvedCtx) => {
+    const ctx = approvedCtx || agentLoopResumeRef.current
+    if (!ctx) return
+
+    const { payload, safeResults, readFileContents, needsApprovalOps, round, MAX_ROUNDS, loopMessages, agentWorkspaceRoot } = ctx
+    agentLoopResumeRef.current = null
+
+    // Continue from the next round — result is already in loopMessages (added by approval handler)
+    setSending(true)
+    let continueRound = round + 1
+
+    while (continueRound <= MAX_ROUNDS) {
+      setStatus(`Agent round ${continueRound}/${MAX_ROUNDS} — thinking...`)
+
+      let responseText = ''
+      const streamMessageId = 'stream_' + Date.now()
+
+      setMessages((current) => [
+        ...current,
+        { id: streamMessageId, role: 'assistant', kind: 'chat', content: '' }
+      ])
+
+      try {
+        const controller = new AbortController()
+        generationAbortRef.current = controller
+
+        responseText = await callAgentApi(loopMessages, controller)
+
+        pushActivity('success', `Agent round ${continueRound} response received.`)
+        const newPayload = extractAgentPayload(responseText)
+        setMessages((current) =>
+          current.map((m) => (m.id === streamMessageId ? { ...m, content: buildAgentDisplayContent(responseText, newPayload) } : m))
+        )
+
+        if (!newPayload || newPayload.operations.length === 0) {
+          setStatus(`Agent finished after ${continueRound} round(s).`)
+          pushActivity('info', `Agent finished after ${continueRound} round(s).`)
+          if (!newPayload) {
+            // Already shown via streamMessageId
+          } else {
+            setMessages((current) => [
+              ...current.filter(m => m.id !== streamMessageId),
+              { role: 'assistant', kind: 'chat', content: buildAgentDisplayContent(responseText, newPayload) }
+            ])
+          }
+          loopMessages.push({ role: 'assistant', content: responseText })
+          generationAbortRef.current = null
+          setSending(false)
+          return
+        }
+
+        if (!rootFolder) {
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            { role: 'assistant', content: 'Open a workspace folder first, then I can create/update/delete files for you.' }
+          ])
+          generationAbortRef.current = null
+          setSending(false)
+          return
+        }
+
+        const agentScope = getAgentWorkspaceScope()
+        if (!agentScope) {
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            { role: 'assistant', content: 'Open a workspace folder first, then I can create/update/delete files for you.' }
+          ])
+          generationAbortRef.current = null
+          setSending(false)
+          return
+        }
+
+        const safeOps = newPayload.operations.filter((op) => {
+          const action = String(op?.action || '').toLowerCase()
+          return action === 'read' || action === 'mkdir'
+        })
+        const approvalOps = newPayload.operations.filter((op) => {
+          const action = String(op?.action || '').toLowerCase()
+          return action !== 'read' && action !== 'mkdir'
+        })
+
+        let safeResults2 = []
+        let readFileContents2 = []
+
+        if (safeOps.length > 0) {
+          setStatus(`Executing ${safeOps.length} safe operation(s)...`)
+          const safeResult = await window.api.applyAgentOperations({
+            rootFolder: agentScope,
+            operations: safeOps
+          })
+          if (Array.isArray(safeResult?.applied)) {
+            for (const applied of safeResult.applied) {
+              if (applied.action === 'read') {
+                if (applied.content !== null && applied.content !== undefined) {
+                  const maxShow = 3000
+                  const truncated = applied.content.length > maxShow
+                  readFileContents2.push({
+                    path: applied.path,
+                    content: truncated ? applied.content.slice(0, maxShow) + '\n...(truncated)' : applied.content
+                  })
+                  safeResults2.push(`Read "${basenameFromPath(applied.path)}" (${(applied.size / 1024).toFixed(1)}KB)`)
+                } else if (Array.isArray(applied.directory)) {
+                  const listing = applied.directory
+                    .map((entry) => `${entry.isDirectory ? '📁' : '📄'} ${entry.name}`)
+                    .join('\n')
+                  readFileContents2.push({
+                    path: applied.path,
+                    content: `Directory listing (${applied.directory.length} items):\n${listing}`
+                  })
+                  safeResults2.push(`Read directory "${basenameFromPath(applied.path)}"`)
+                }
+              } else if (applied.action === 'mkdir') {
+                safeResults2.push(`Created directory "${basenameFromPath(applied.path)}"`)
+              }
+            }
+          }
+          if (agentScope) await loadDirectory(agentScope)
+        }
+
+        const buildResult = () => {
+          const p = []
+          if (readFileContents2.length > 0) {
+            p.push('**Files read:**')
+            p.push(readFileContents2.map(f => `--- ${basenameFromPath(f.path)} ---\n${f.content}`).join('\n\n'))
+          }
+          if (safeResults2.length > 0) {
+            p.push(`**Safe operations completed:** ${safeResults2.join('. ')}.`)
+          }
+          return p.join('\n\n')
+        }
+
+        if (approvalOps.length === 0) {
+          setPendingAgentProposal(null)
+          setPendingAgentStepIndex(0)
+          const rt = buildResult()
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            { role: 'assistant', kind: 'chat', content: newPayload.explanation ? `${newPayload.explanation}\n\n${rt}` : rt }
+          ])
+          loopMessages.push({ role: 'assistant', content: responseText })
+          loopMessages.push({ role: 'user', content: `Here are the results of your last actions:\n\n${rt}\n\nIf there's more to do, provide the next set of operations. If the task is complete, just say so.` })
+          setStatus(`Round ${continueRound} done — continuing...`)
+          continueRound++
+          continue
+        }
+
+        // Need approval — pause again
+        setPendingAgentProposal(newPayload)
+        setPendingAgentStepIndex(0)
+        setStatus(`Review the next action.`)
+        setMessages((current) => [
+          ...current.filter(m => m.id !== streamMessageId),
+          {
+            role: 'assistant',
+            kind: 'approval',
+            operationIndex: 0,
+            operations: approvalOps,
+            summary: newPayload.summary || 'I prepared more changes. Review and choose Allow or Skip.',
+            explanation: newPayload.explanation || ''
+          }
+        ])
+
+        return new Promise((resolve) => {
+          agentLoopResumeRef.current = {
+            resolve,
+            payload: { ...newPayload, responseText },
+            safeResults: safeResults2,
+            readFileContents: readFileContents2,
+            needsApprovalOps: approvalOps,
+            round: continueRound,
+            MAX_ROUNDS,
+            loopMessages,
+            agentWorkspaceRoot: agentScope
+          }
+        })
+
+      } catch (error) {
+        setMessages((current) => current.filter(m => m.id !== streamMessageId))
+        if (error?.name === 'AbortError') {
+          setStatus('Agent loop aborted.')
+          pushActivity('warning', 'Agent loop was cancelled.')
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: 'Agent loop was aborted.' }
+          ])
+        } else {
+          console.error(error)
+          setMessages((current) => [
+            ...current,
+            { role: 'assistant', content: `Error in round ${continueRound}: ${error.message}` }
+          ])
+        }
+        generationAbortRef.current = null
+        setSending(false)
+        return
+      }
+    }
+
+    generationAbortRef.current = null
+    setSending(false)
+    if (continueRound > MAX_ROUNDS) {
+      setStatus(`Agent reached max rounds (${MAX_ROUNDS}). Type more instructions to continue.`)
     }
   }
 
@@ -5669,29 +6333,92 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
 
               <aside
                 style={{ width: `${rightWidth}px` }}
-                className={`flex min-w-0 flex-col ${appearanceMode === 'light' ? 'bg-white' : 'bg-[#252526]'}`}
+                className={`flex min-w-0 flex-col ${appearanceMode === 'light' ? 'bg-white' : 'bg-[#1e1e20]'}`}
               >
                 <div
-                  className={`flex items-center justify-between border-b px-3 py-2 ${appearanceMode === 'light' ? 'border-gray-200' : 'border-black'}`}
+                  className={`flex items-center justify-between border-b px-3 py-2.5 ${
+                    appearanceMode === 'light'
+                      ? 'border-gray-200'
+                      : 'border-white/5 bg-gradient-to-r from-[#1e1e20] to-[#252528]'
+                  }`}
                 >
-                  <div className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    {mode === 'agent' ? 'Agent Mode' : 'Chat Mode'}
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-purple-500">
+                      <Bot size={14} className="text-white" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        {mode === 'agent' ? 'Agent' : 'Chat'}
+                      </div>
+                      <div className="text-[10px] text-gray-500">
+                        {mode === 'agent' ? 'Builds, edits, runs' : 'Answers questions'}
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500">Use the controls below</div>
+                  <div className="text-[10px] text-gray-600">Use the controls below</div>
                 </div>
 
-                <div className="samcode-scrollbar min-h-0 flex-1 overflow-auto p-4">
+                <div ref={messagesScrollRef} className="samcode-scrollbar min-h-0 flex-1 overflow-auto p-3">
                   {messages.length === 0 ? (
-                    <div className="rounded border border-dashed border-gray-700 p-4 text-center text-sm text-gray-400">
-                      <Bot size={24} className="mx-auto mb-2 text-blue-400" />
-                      Ask a question or request an edit.
-                    </div>
+                    mode === 'agent' ? (
+                      <div className="flex flex-col items-center text-center">
+                        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500/20 to-purple-500/20">
+                          <Bot size={24} className="text-blue-400" />
+                        </div>
+                        <div className="mb-1 text-sm font-semibold text-white">How can I help?</div>
+                        <div className="mb-4 text-xs text-gray-500">
+                          I can create files, run commands, edit code — just tell me what to do.
+                        </div>
+                        <div className="flex flex-col gap-2 w-full">
+                          {[
+                            ['Create a React app', 'Create a simple React app with a counter component'],
+                            ['Set up a Flask API', 'Set up a Python Flask API with a /hello endpoint'],
+                            ['Analyze project', 'Explain the project structure']
+                          ].map(([label, prompt]) => (
+                            <button
+                              key={label}
+                              type="button"
+                              onClick={() => setInput(prompt)}
+                              className="w-full rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2.5 text-left text-xs text-gray-300 transition-colors hover:bg-white/[0.06] hover:border-white/10"
+                            >
+                              <div className="font-medium text-white">{label}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center text-center">
+                        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20">
+                          <Bot size={24} className="text-emerald-400" />
+                        </div>
+                        <div className="mb-1 text-sm font-semibold text-white">Ask me anything</div>
+                        <div className="mb-4 text-xs text-gray-500">
+                          Code questions, debugging, explanations — I've got you covered.
+                        </div>
+                        <div className="flex flex-col gap-2 w-full">
+                          {[
+                            ['Sort array of objects', 'How do I sort an array of objects by a property in JavaScript?'],
+                            ['Read CSV in Python', 'Write a Python function to read a CSV file and return a list of dictionaries'],
+                            ['Explain async/await', 'Explain how async/await works in JavaScript']
+                          ].map(([label, prompt]) => (
+                            <button
+                              key={label}
+                              type="button"
+                              onClick={() => setInput(prompt)}
+                              className="w-full rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2.5 text-left text-xs text-gray-300 transition-colors hover:bg-white/[0.06] hover:border-white/10"
+                            >
+                              <div className="font-medium text-white">{label}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
                   ) : (
-                    <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-3">
                       {messages.map((message, index) => (
                         <div key={index}>
                           {message.kind === 'approval' ? (
-                            <div className="rounded-lg border border-blue-500/30 bg-[#20252f] p-3 shadow-lg">
+                            <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-3">
                               {(() => {
                                 const operations = Array.isArray(message.operations)
                                   ? message.operations
@@ -5703,50 +6430,49 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                                   .filter(
                                     (op) => String(op?.action || '').toLowerCase() === 'execute'
                                   ).length
-                                const remainingFiles = operations
-                                  .slice(currentOpIdx)
-                                  .filter(
-                                    (op) => String(op?.action || '').toLowerCase() !== 'execute'
-                                  ).length
 
                                 return (
                                   <>
-                                    <div className="mb-2 flex items-start justify-between gap-3">
-                                      <div>
-                                        <div className="text-xs font-semibold uppercase tracking-wider text-blue-300">
-                                          Approval required
+                                    <div className="mb-2.5 flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/20">
+                                          <div className="h-2 w-2 rounded-full bg-blue-400" />
                                         </div>
-                                        <div className="mt-1 text-sm text-gray-200">
-                                          {message.summary ||
-                                            'Review the next agent action before it runs.'}
-                                        </div>
+                                        <span className="text-xs font-medium text-blue-300">
+                                          Approval needed
+                                        </span>
                                       </div>
-                                      <div className="text-right text-[11px] text-gray-400">
-                                        <div>{remainingCommands} command(s)</div>
-                                        <div>{remainingFiles} file action(s)</div>
-                                      </div>
-                                    </div>
-
-                                    <div className="space-y-2">
-                                      {currentOperation ? (
-                                        <div className="rounded border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-200">
-                                          <div className="font-medium text-white">
-                                            {describeAgentOperation(currentOperation)}
-                                          </div>
-                                        </div>
-                                      ) : (
-                                        <div className="rounded border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-200">
-                                          File changes will apply automatically.
-                                        </div>
+                                      {remainingCommands > 0 && (
+                                        <span className="text-[10px] text-gray-500">
+                                          {remainingCommands} command{remainingCommands > 1 ? 's' : ''} remaining
+                                        </span>
                                       )}
                                     </div>
 
-                                    <div className="mt-3 flex items-center justify-end gap-2">
+                                    {message.explanation && (
+                                      <div className="text-xs text-gray-300 mb-2 leading-relaxed">
+                                        {message.explanation}
+                                      </div>
+                                    )}
+
+                                    <div className="text-xs text-gray-400 mb-2.5">
+                                      {message.summary || 'Review the next action before it runs.'}
+                                    </div>
+
+                                    {currentOperation && (
+                                      <div className="rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2.5 text-xs mb-3">
+                                        <div className="font-medium text-white mb-0.5">
+                                          {describeAgentOperation(currentOperation)}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <div className="flex items-center justify-end gap-2">
                                       <button
                                         type="button"
                                         onClick={() => skipPendingAgentProposal()}
                                         disabled={approvalBusy}
-                                        className="rounded border border-gray-600 bg-[#2b2b2d] px-3 py-1.5 text-xs font-semibold text-gray-200 hover:bg-[#38383a] disabled:cursor-not-allowed disabled:opacity-60"
+                                        className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-xs font-medium text-gray-400 hover:bg-white/5 hover:text-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
                                       >
                                         Skip
                                       </button>
@@ -5757,9 +6483,9 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                                           await approvePendingAgentProposal()
                                         }}
                                         disabled={approvalBusy}
-                                        className="rounded bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                                        className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-50"
                                       >
-                                        {approvalBusy ? 'Running...' : 'Allow'}
+                                        {approvalBusy ? 'Running…' : 'Allow'}
                                       </button>
                                     </div>
                                   </>
@@ -5768,32 +6494,39 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                             </div>
                           ) : (
                             <div
-                              className={`max-w-full wrap-break-word rounded-md px-3 py-2 text-sm ${
+                              className={`max-w-full wrap-break-word rounded-xl px-3.5 py-2.5 ${
                                 message.role === 'user'
-                                  ? 'self-end bg-slate-600 text-white'
-                                  : 'self-start bg-slate-900 text-gray-100'
+                                  ? 'self-end bg-blue-500/20 text-white border border-blue-500/10'
+                                  : 'self-start bg-white/[0.03] text-gray-200 border border-white/5'
                               }`}
                             >
-                              <div className="mb-2 flex items-center justify-between gap-2">
-                                <div className="text-[11px] font-medium opacity-80">
-                                  {message.role === 'user' ? 'You' : 'Sam'}
+                              <div className="mb-1.5 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  {message.role === 'assistant' && (
+                                    <div className="flex h-4 w-4 items-center justify-center rounded bg-gradient-to-br from-blue-500 to-purple-500">
+                                      <Bot size={9} className="text-white" />
+                                    </div>
+                                  )}
+                                  <span className="text-[10px] font-medium text-gray-500">
+                                    {message.role === 'user' ? 'You' : 'Sam'}
+                                  </span>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-1">
                                   <button
                                     type="button"
                                     onClick={() => handleCopyMessage(message.content)}
-                                    className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10 hover:text-white"
+                                    className="rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
                                     aria-label="Copy message"
                                   >
-                                    <Copy size={12} />
+                                    <Copy size={11} />
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => handleEditMessage(message.content)}
-                                    className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10 hover:text-white"
+                                    className="rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
                                     aria-label="Edit message"
                                   >
-                                    <Edit3 size={12} />
+                                    <Edit3 size={11} />
                                   </button>
                                 </div>
                               </div>
@@ -5811,7 +6544,7 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                   )}
                 </div>
 
-                <div className="border-t border-black bg-[#1e1e1e] p-3">
+                <div className={`border-t px-3 py-2.5 ${appearanceMode === 'light' ? 'border-gray-200 bg-white' : 'border-white/5 bg-[#1e1e20]'}`}>
                   <div className="relative">
                     <textarea
                       value={input}
@@ -5822,42 +6555,26 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                           sendMessage()
                         }
                       }}
-                      rows={3}
-                      placeholder={sending ? 'Loading...' : `Ask Sam (${mode})...`}
-                      className="w-full resize-none rounded border border-gray-600 bg-[#3c3c3c] px-3 py-2 pr-10 pb-10 text-sm text-white outline-none placeholder:text-gray-400 focus:border-blue-500"
+                      rows={2}
+                      placeholder={sending ? 'Thinking...' : mode === 'agent' ? 'Tell me what to build...' : 'Ask me anything...'}
+                      className="w-full resize-none rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 pr-10 text-sm text-white outline-none placeholder:text-gray-600 focus:border-blue-500/50 focus:bg-white/[0.06] transition-colors"
                     />
                     <button
                       type="button"
                       onClick={sendMessage}
                       disabled={sending || approvalBusy || !input.trim()}
-                      className="absolute bottom-2 right-2 inline-flex items-center gap-2 rounded p-1 text-gray-200 transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-gray-600"
+                      className="absolute bottom-2 right-2 inline-flex items-center justify-center rounded-lg p-1.5 text-gray-500 transition-colors hover:text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:text-gray-700 disabled:hover:bg-transparent"
                       aria-label={sending || approvalBusy ? 'Sending message' : 'Send message'}
                     >
                       {sending || approvalBusy ? (
-                        <span className="inline-flex h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                      ) : null}
-                      <ChevronUp size={16} />
+                        <span className="inline-flex h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/20 border-t-blue-400" />
+                      ) : (
+                        <ChevronUp size={16} />
+                      )}
                     </button>
                   </div>
-                  <div className="mt-2 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs text-gray-500">
-                        {sending ? 'Thinking…' : footerStatus}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {sending && (
-                          <button
-                            type="button"
-                            onClick={abortGeneration}
-                            className="rounded bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-500"
-                          >
-                            Stop
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-2 flex items-center gap-2" data-agent-pickers>
+                  <div className="mt-2 flex items-center justify-between">
+                    <div className="flex items-center gap-2" data-agent-pickers>
                       <div className="relative">
                         <button
                           type="button"
@@ -5865,13 +6582,13 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                             setShowAgentModelMenu(false)
                             setShowModeMenu((current) => !current)
                           }}
-                          className="inline-flex items-center gap-2 rounded px-1 py-0.5 text-xs text-gray-200 hover:text-white"
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
                         >
-                          <span>{mode === 'agent' ? 'Agent' : 'Chat'}</span>
-                          <span className="text-gray-500">▾</span>
+                          <span>{mode === 'agent' ? '⚡ Agent' : '💬 Chat'}</span>
+                          <span className="text-gray-600">▾</span>
                         </button>
                         {showModeMenu && (
-                          <div className="absolute bottom-full left-0 z-50 mb-2 w-40 rounded border border-black bg-[#1f1f1f] p-1 shadow-xl">
+                          <div className="absolute bottom-full left-0 z-50 mb-2 w-40 rounded-xl border border-white/10 bg-[#1e1e22] p-1 shadow-xl">
                             {['chat', 'agent'].map((nextMode) => (
                               <button
                                 key={nextMode}
@@ -5880,11 +6597,15 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                                   setMode(nextMode)
                                   setShowModeMenu(false)
                                 }}
-                                className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#323232]"
+                                className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs ${
+                                  mode === nextMode
+                                    ? 'bg-blue-500/15 text-blue-300'
+                                    : 'text-gray-400 hover:bg-white/5'
+                                }`}
                               >
-                                <span>{nextMode === 'chat' ? 'Chat' : 'Agent'}</span>
+                                <span>{nextMode === 'chat' ? '💬 Chat' : '⚡ Agent'}</span>
                                 {mode === nextMode && (
-                                  <span className="text-xs text-gray-500">Selected</span>
+                                  <span className="text-[10px]">✓</span>
                                 )}
                               </button>
                             ))}
@@ -5892,24 +6613,24 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                         )}
                       </div>
 
-                      <div className="relative min-w-0 flex-1">
+                      <div className="relative">
                         <button
                           type="button"
                           onClick={() => {
                             setShowModeMenu(false)
                             setShowAgentModelMenu((current) => !current)
                           }}
-                          className="inline-flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-xs text-gray-200 hover:text-white"
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
                         >
-                          <span className="truncate">{selectedModel || 'Choose model'}</span>
-                          <span className="text-gray-500">▾</span>
+                          <span className="truncate max-w-[120px]">{selectedModel || 'Model'}</span>
+                          <span className="text-gray-600">▾</span>
                         </button>
                         {showAgentModelMenu && (
-                          <div className="absolute bottom-full left-0 z-50 mb-2 max-h-56 w-full overflow-auto rounded border border-black bg-[#1f1f1f] p-1 shadow-xl">
+                          <div className="absolute bottom-full left-0 z-50 mb-2 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-[#1e1e22] p-1 shadow-xl">
                             {pinnedModelOptions.length ? (
                               <>
-                                <div className="px-3 py-1 text-[11px] uppercase tracking-wider text-gray-500">
-                                  Pinned Models
+                                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-600">
+                                  Pinned
                                 </div>
                                 {pinnedModelOptions.map((model) => (
                                   <button
@@ -5919,11 +6640,15 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                                       setSelectedModel(model)
                                       setShowAgentModelMenu(false)
                                     }}
-                                    className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#323232]"
+                                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs ${
+                                      selectedModel === model
+                                        ? 'bg-blue-500/15 text-blue-300'
+                                        : 'text-gray-400 hover:bg-white/5'
+                                    }`}
                                   >
                                     <span className="truncate">{model}</span>
                                     {selectedModel === model && (
-                                      <span className="text-xs text-gray-500">Selected</span>
+                                      <span className="text-[10px]">✓</span>
                                     )}
                                   </button>
                                 ))}
@@ -5932,8 +6657,8 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
 
                             {otherModelOptions.length ? (
                               <>
-                                <div className="mt-1 px-3 py-1 text-[11px] uppercase tracking-wider text-gray-500">
-                                  Other Models
+                                <div className="mt-1 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-600">
+                                  Other
                                 </div>
                                 {otherModelOptions.map((model) => (
                                   <button
@@ -5943,19 +6668,16 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                                       setSelectedModel(model)
                                       setShowAgentModelMenu(false)
                                     }}
-                                    className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-gray-200 hover:bg-[#323232]"
+                                    className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-gray-400 hover:bg-white/5"
                                   >
                                     <span className="truncate">{model}</span>
-                                    {selectedModel === model && (
-                                      <span className="text-xs text-gray-500">Selected</span>
-                                    )}
                                   </button>
                                 ))}
                               </>
                             ) : null}
 
                             {!pinnedModelOptions.length && !otherModelOptions.length && (
-                              <div className="px-3 py-2 text-xs text-gray-500">
+                              <div className="px-3 py-2 text-xs text-gray-600">
                                 No models loaded
                               </div>
                             )}
@@ -5963,6 +6685,16 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                         )}
                       </div>
                     </div>
+                    {sending && (
+                      <button
+                        type="button"
+                        onClick={abortGeneration}
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                      >
+                        <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-red-400" />
+                        Stop
+                      </button>
+                    )}
                   </div>
                 </div>
               </aside>
@@ -6268,6 +7000,8 @@ REMEMBER: You are autonomous. Self-heal. Self-improve. Don't wait for permission
                       <option value="auto">Auto detect</option>
                       <option value="openai">OpenAI</option>
                       <option value="openrouter">OpenRouter</option>
+                      <option value="anthropic">Anthropic (Claude)</option>
+                      <option value="opencode">OpenCode (Zen)</option>
                       <option value="ollama">Ollama</option>
                       <option value="google">Google</option>
                     </select>

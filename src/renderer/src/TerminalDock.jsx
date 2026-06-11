@@ -497,7 +497,7 @@ function TerminalDock({
       setFocusSignal((current) => current + 1)
       onCommandExecuted?.()
     }
-  }, [activeSessionId, sessions, onCommandExecuted, defaultShell])
+  }, [activeSessionId, sessions, onCommandExecuted, defaultShell, command])
 
   const handleSessionExit = (payload) => {
     try {
