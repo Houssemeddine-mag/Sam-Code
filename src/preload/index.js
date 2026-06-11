@@ -55,7 +55,13 @@ const api = {
     const listener = (_, payload) => callback(payload)
     ipcRenderer.on('terminal:exit', listener)
     return () => ipcRenderer.removeListener('terminal:exit', listener)
-  }
+  },
+  // .sam/ directory: per-folder agent history and configuration
+  samEnsureDir: (folderPath) => ipcRenderer.invoke('sam:ensureDir', folderPath),
+  samLoadConversations: (folderPath) => ipcRenderer.invoke('sam:loadConversations', folderPath),
+  samSaveConversations: (folderPath, data) => ipcRenderer.invoke('sam:saveConversations', folderPath, data),
+  samLoadSettings: (folderPath) => ipcRenderer.invoke('sam:loadSettings', folderPath),
+  samSaveSettings: (folderPath, data) => ipcRenderer.invoke('sam:saveSettings', folderPath, data)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

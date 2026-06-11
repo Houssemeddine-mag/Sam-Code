@@ -113,6 +113,10 @@ function App() {
   const editorMainRef = useRef(null)
   const messagesScrollRef = useRef(null)
 
+  // Diff view state — shows old vs new code in a temporary split tab
+  const [diffView, setDiffView] = useState(null) // { path, oldContent, newContent, operations }
+  const [previousActivePath, setPreviousActivePath] = useState('')
+
   const [code, setCode] = useState('')
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEYS.apiKey) || '')
   const [apiProvider, setApiProvider] = useState(
@@ -127,7 +131,12 @@ function App() {
     localStorage.setItem(STORAGE_KEYS.mode, nextMode)
   }
   const [input, setInput] = useState('')
+  // Per-folder conversations: messages for the current rootFolder
   const [messages, setMessages] = useState([])
+  // Cache of conversations per folder: { [folderPath]: messages[] }
+  const folderConversationsRef = useRef({})
+  // Debounce timer ref for saving conversations
+  const saveTimerRef = useRef(null)
   const [availableModels, setAvailableModels] = useState([])
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsError, setModelsError] = useState('')
@@ -148,6 +157,66 @@ function App() {
       })
     }
   }, [messages, sending])
+
+  // Load conversations from .sam/ when rootFolder changes
+  useEffect(() => {
+    if (!rootFolder) {
+      console.log('[.sam LOAD] no rootFolder, clearing messages')
+      setMessages([])
+      return
+    }
+    const folder = rootFolder
+    console.log('[.sam LOAD] loading for folder:', folder)
+    ;(async () => {
+      // Try loading from .sam/ first
+      console.log('[.sam LOAD] calling samLoadConversations...')
+      const saved = await window.api.samLoadConversations(folder)
+      console.log('[.sam LOAD] result:', saved)
+      if (saved && Array.isArray(saved)) {
+        console.log('[.sam LOAD] loaded', saved.length, 'messages from .sam/')
+        setMessages(saved)
+        folderConversationsRef.current[folder] = saved
+        return
+      }
+      console.log('[.sam LOAD] no .sam/ data, checking localStorage fallback')
+      // Try localStorage fallback (legacy)
+      try {
+        const legacy = JSON.parse(localStorage.getItem('sam_folder_conversations') || '{}')
+        if (legacy[folder]) {
+          console.log('[.sam LOAD] loaded', legacy[folder].length, 'messages from localStorage')
+          setMessages(legacy[folder])
+          folderConversationsRef.current[folder] = legacy[folder]
+          return
+        }
+      } catch { /* ignore */ }
+      console.log('[.sam LOAD] no saved conversations, starting fresh')
+      // No saved conversations — start fresh
+      setMessages([])
+    })()
+  }, [rootFolder])
+
+  // Debounced auto-save conversations to .sam/
+  useEffect(() => {
+    if (!rootFolder) {
+      console.log('[.sam SAVE] skipped — no rootFolder')
+      return
+    }
+    if (messages.length === 0) {
+      console.log('[.sam SAVE] skipped — no messages')
+      return
+    }
+    folderConversationsRef.current[rootFolder] = messages
+    clearTimeout(saveTimerRef.current)
+    console.log('[.sam SAVE] scheduling save for', rootFolder, '—', messages.length, 'messages')
+    saveTimerRef.current = setTimeout(() => {
+      console.log('[.sam SAVE] actually calling ipc save for', rootFolder)
+      window.api.samSaveConversations(rootFolder, messages).then((result) => {
+        console.log('[.sam SAVE] result:', result)
+      }).catch((err) => {
+        console.error('[.sam SAVE] error:', err)
+      })
+    }, 500)
+  }, [messages, rootFolder])
 
   const [installedPackages, setInstalledPackages] = useState(() => {
     try {
@@ -716,9 +785,17 @@ function App() {
         const content = String(op?.content || '')
         if (content) {
           const ext = op.path.split('.').pop().toLowerCase()
+          // Never dump raw JSON for notebook files — just mention the file
+          if (ext === 'ipynb') {
+            parts.push(`**File:** \`${op.path}\` (${Math.round(content.length / 1024)}KB)`)
+            continue
+          }
           const langMap = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', cpp: 'cpp', c: 'c', java: 'java', html: 'html', css: 'css', json: 'json', sh: 'bash', md: 'markdown' }
           const lang = langMap[ext] || 'text'
-          parts.push(`\`\`\`${lang}\n${content}\n\`\`\``)
+          // Truncate very large files to avoid flooding the chat
+          const maxShow = 800
+          const display = content.length > maxShow ? content.slice(0, maxShow) + '\n\n...(truncated — full code shown in diff tab)' : content
+          parts.push(`\`\`\`${lang}\n${display}\n\`\`\``)
         }
       }
     }
@@ -833,15 +910,19 @@ IMPORTANT RULES:
 4. Use CLI tools for scaffolding (npm create vite@latest --yes, etc.) — don't write boilerplate manually.
 5. When a command fails, propose a fix.
 6. Never output commands that require interactive input.
-7. Group related operations together.
-8. When you see the results of your previous operations, decide what to do next. If the task is complete, just say so without proposing more operations.
+7. Group ALL related operations together in ONE response.
+8. After you propose changes and they are applied, continue with the next step of your plan. When everything is truly done, respond with a brief summary — NO JSON block, just plain text.
+9. If you already created or updated a file, do NOT propose another update for the same file.
+10. When the user reports an error (syntax error, NameError, ModuleNotFoundError, etc.), ALWAYS read the file first — do NOT blindly resend the entire file. Find the exact broken line, fix it, and apply the fix.
+11. NEVER output raw JSON blocks in your natural-language responses. Never show the user the full content of a notebook file. Just explain what you changed in plain English.
 
 COMMON FIXES:
-- "Module not found" → npm install the package
+- "Module not found" → pip install the package
 - "Port already in use" → kill the process, retry
 - "Permission denied" → try with elevated privileges
 - "Command not found" → install the tool or use an alternative
-- "Syntax error" → provide corrected code
+- "Syntax error" → read the file, find the exact broken line, fix it
+- "NameError" → read the file, find the missing import, add it
 - "npm ERR" → npm cache clean --force, then npm install
 
 RESPONSE FORMAT:
@@ -2509,7 +2590,7 @@ One sentence summary, then a JSON block with "summary" and "operations". When th
     if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx')) return 'cpp'
     if (lower.endsWith('.css')) return 'css'
     if (lower.endsWith('.html')) return 'html'
-    if (lower.endsWith('.json')) return 'json'
+    if (lower.endsWith('.json') || lower.endsWith('.ipynb')) return 'json'
     if (lower.endsWith('.md')) return 'markdown'
     return 'plaintext'
   }
@@ -3388,6 +3469,177 @@ rem Script generated for ${fileName}
     }
   }
 
+  // Open a temporary split-view tab showing old code (left) vs new code (right) for file edits
+  const openDiffView = async (operations, summary, explanation) => {
+    const fileOps = operations.filter(op => {
+      const a = String(op?.action || '').toLowerCase()
+      return ['create', 'update', 'write', 'upsert'].includes(a)
+    })
+    if (fileOps.length === 0) return
+
+    const op = fileOps[0] // show the first file edit
+    const filePath = String(op?.path || '')
+    const newContent = String(op?.content || '')
+    const fileAction = String(op?.action || '').toLowerCase()
+
+    // Try to read the existing file
+    let oldContent = ''
+    if (fileAction === 'create') {
+      oldContent = '// (new file — no previous content)'
+    } else {
+      try {
+        const result = await window.api.readFile(filePath)
+        oldContent = result?.content ?? '// (could not read existing file)'
+      } catch {
+        oldContent = '// (could not read existing file)'
+      }
+    }
+
+    const tabName = `Diff: ${basenameFromPath(filePath)}`
+    const tabId = `__diff__${filePath}`
+
+    // Save current active path to restore later
+    setPreviousActivePath((prev) => prev.startsWith('__diff__') ? prev : activePath)
+
+    // Close any previous diff tab
+    setTabs((current) => current.filter(t => !t.path.startsWith('__diff__')))
+    setActivePath('')
+
+    setDiffView({
+      tabId,
+      tabName,
+      filePath,
+      fileAction,
+      oldContent,
+      newContent,
+      operations,
+      summary,
+      explanation
+    })
+
+    setTabs((current) => [
+      ...current,
+      { path: tabId, name: tabName, missing: false }
+    ])
+    setActivePath(tabId)
+  }
+
+  // Close the diff view and clean up
+  const closeDiffView = () => {
+    setDiffView(null)
+    setTabs((prev) => {
+      const remaining = prev.filter(t => !t.path.startsWith('__diff__'))
+      return remaining
+    })
+    // Restore the previous active file path
+    setActivePath((prev) => {
+      if (prev.startsWith('__diff__')) {
+        return previousActivePath || ''
+      }
+      return prev
+    })
+    setPreviousActivePath('')
+  }
+
+  // Accept the changes from the diff view
+  const acceptDiffChanges = async () => {
+    if (!diffView) return
+    setApprovalBusy(true)
+    try {
+      const workspaceRoot = getAgentWorkspaceScope() || rootFolder
+      const result = await window.api.applyAgentOperations({
+        rootFolder: workspaceRoot,
+        operations: diffView.operations
+      })
+      const applied = Array.isArray(result?.applied) ? result.applied : []
+      const failed = Array.isArray(result?.failed) ? result.failed : []
+
+      const lines = []
+      if (applied.length > 0) {
+        lines.push(`**Applied ${applied.length} operation(s):**`)
+        applied.slice(0, 10).forEach(op => {
+          const sizeInfo = op.size ? ` (${(op.size / 1024).toFixed(1)}KB)` : ''
+          lines.push(`- ${op.action}: ${op.path || op.command || 'success'}${sizeInfo}`)
+        })
+      }
+      if (failed.length > 0) {
+        lines.push(`**Failed ${failed.length} operation(s):**`)
+        failed.slice(0, 5).forEach(op => {
+          lines.push(`- ${op.action || 'unknown'} ${op.path || ''}: ${op.reason || 'error'}`)
+        })
+      }
+      if (applied.length === 0 && failed.length === 0) {
+        lines.push('No changes were applied.')
+      }
+
+      const resultMessage = lines.join('\n\n')
+
+      // Add result to agent messages
+      const resultMsg = {
+        role: 'assistant',
+        kind: 'chat',
+        content: resultMessage
+      }
+      setMessages((current) => [...current, resultMsg])
+
+      // If in an agent loop, resume it
+      const loopCtx = agentLoopResumeRef.current
+      if (loopCtx) {
+        agentLoopResumeRef.current = null
+        loopCtx.loopMessages.push({ role: 'assistant', content: resultMessage })
+        loopCtx.loopMessages.push({ role: 'user', content: `Actions completed: ${resultMessage}\n\nTell the user what was done and invite them to try again or ask for more changes. No JSON block.` })
+        setStatus('Changes applied — continuing agent loop...')
+        closeDiffView()
+        setPendingAgentProposal(null)
+        setPendingAgentStepIndex(0)
+        resumeAgentLoop(loopCtx)
+        return
+      }
+
+      closeDiffView()
+      setPendingAgentProposal(null)
+      setPendingAgentStepIndex(0)
+      setStatus('Agent finished all approved steps.')
+
+      // Reload the file tab
+      const fileOps = diffView.operations.filter(op => {
+        const a = String(op?.action || '').toLowerCase()
+        return ['create', 'update', 'write', 'upsert'].includes(a)
+      })
+      if (fileOps.length > 0 && fileOps[0].path) {
+        await openFile(fileOps[0].path)
+      }
+
+      if (workspaceRoot) await loadDirectory(workspaceRoot)
+    } catch (error) {
+      setMessages((current) => [...current, {
+        role: 'assistant',
+        kind: 'chat',
+        content: `Error applying changes: ${error.message}`
+      }])
+    } finally {
+      setApprovalBusy(false)
+      closeDiffView()
+      setPendingAgentProposal(null)
+      setPendingAgentStepIndex(0)
+    }
+  }
+
+  // Skip the diff view
+  const skipDiffView = () => {
+    closeDiffView()
+    setPendingAgentProposal(null)
+    setPendingAgentStepIndex(0)
+
+    const loopCtx = agentLoopResumeRef.current
+    if (loopCtx) {
+      agentLoopResumeRef.current = null
+      loopCtx.loopMessages.push({ role: 'user', content: `The following operations were skipped: ${pendingAgentProposal?.summary || 'agent proposal'}. Decide if there's an alternative approach.` })
+      resumeAgentLoop(loopCtx)
+      return
+    }
+  }
+
   const toggleDirectory = async (dirPath) => {
     const isExpanded = Boolean(expanded[dirPath])
     setExpanded((current) => ({ ...current, [dirPath]: !isExpanded }))
@@ -3833,14 +4085,20 @@ rem Script generated for ${fileName}
   }
 
   const closeFileTab = (tabPath) => {
+    // If it's a diff tab, use closeDiffView
+    if (tabPath.startsWith('__diff__')) {
+      closeDiffView()
+      return
+    }
     setTabs((currentTabs) => {
       const remainingTabs = currentTabs.filter((tab) => tab.path !== tabPath)
       setActivePath((currentActivePath) => {
         if (currentActivePath !== tabPath) {
           return currentActivePath
         }
-
-        return remainingTabs[0]?.path || ''
+        // Skip diff tabs when auto-selecting next tab
+        const nextRealTab = remainingTabs.find(t => !t.path.startsWith('__diff__'))
+        return nextRealTab?.path || ''
       })
       return remainingTabs
     })
@@ -4444,7 +4702,8 @@ rem Script generated for ${fileName}
           if (applied.length > 0) {
             lines.push(`**Applied ${applied.length} operation(s):**`)
             applied.slice(0, 10).forEach(op => {
-              lines.push(`- ${op.action}: ${op.path || op.command || 'success'}`)
+              const sizeInfo = op.size ? ` (${(op.size / 1024).toFixed(1)}KB)` : ''
+              lines.push(`- ${op.action}: ${op.path || op.command || 'success'}${sizeInfo}`)
             })
           }
           if (failed.length > 0) {
@@ -4480,8 +4739,11 @@ rem Script generated for ${fileName}
       if (loopCtx) {
         agentLoopResumeRef.current = null
         loopCtx.loopMessages.push({ role: 'assistant', content: resultMessage })
+        loopCtx.loopMessages.push({ role: 'user', content: `Actions completed: ${resultMessage}\n\nTell the user what was done and invite them to try again or ask for more changes. No JSON block.` })
         setStatus('Executing approved actions — continuing agent loop...')
-        await resumeAgentLoop(loopCtx)
+        // Don't await — resumeAgentLoop may return a Promise (if it encounters more approvals)
+        // and we don't want to block here. The UI will update once setApprovalBusy(false) runs.
+        resumeAgentLoop(loopCtx)
         return
       }
 
@@ -4823,7 +5085,7 @@ rem Script generated for ${fileName}
 
           // Add the round result as a user message so the model sees the output and can continue
           loopMessages.push({ role: 'assistant', content: responseText })
-          loopMessages.push({ role: 'user', content: `Here are the results of your last actions:\n\n${resultText}\n\nIf there's more to do, provide the next set of operations. If the task is complete, just say so.` })
+          loopMessages.push({ role: 'user', content: `Results of your last actions:\n\n${resultText}\n\nTell the user what was done and invite them to try again or ask for more changes. No JSON block.` })
 
           setStatus(`Round ${round} done — continuing...`)
           continue // go to next round
@@ -4836,18 +5098,38 @@ rem Script generated for ${fileName}
         setStatus(`Review the next action.`)
         pushActivity('info', `Agent proposed ${needsApprovalOps.length} action(s) requiring approval.${safeMsg}`)
 
-        // Replace streaming message with the approval message
-        setMessages((current) => [
-          ...current.filter(m => m.id !== streamMessageId),
-          {
-            role: 'assistant',
-            kind: 'approval',
-            operationIndex: 0,
-            operations: needsApprovalOps,
-            summary: payload.summary || 'I prepared some changes. Review and choose Allow or Skip.',
-            explanation: payload.explanation || ''
-          }
-        ])
+        // Check if any operations are file edits → open diff view instead of approval card
+        const fileOps = needsApprovalOps.filter(op => {
+          const a = String(op?.action || '').toLowerCase()
+          return ['create', 'update', 'write', 'upsert'].includes(a)
+        })
+        if (fileOps.length > 0) {
+          // Open diff view in the main editor area
+          await openDiffView(needsApprovalOps, payload.summary, payload.explanation)
+
+          // Replace streaming message with a note pointing to the diff view
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            {
+              role: 'assistant',
+              kind: 'chat',
+              content: `I've prepared changes to **${fileOps.map(op => op.path || 'a file').join(', ')}**. Review the split-view diff tab in the editor and click **Apply & Continue** to approve, or **Skip** to decline.`
+            }
+          ])
+        } else {
+          // Only execute/mkdir/delete ops — show approval card in agent panel
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            {
+              role: 'assistant',
+              kind: 'approval',
+              operationIndex: 0,
+              operations: needsApprovalOps,
+              summary: payload.summary || 'I prepared some changes. Review and choose Allow or Skip.',
+              explanation: payload.explanation || ''
+            }
+          ])
+        }
 
         // Pause the loop — user will click Allow/Skip or Send to continue
         // The loop state (round, loopMessages) stays active via closure
@@ -5064,7 +5346,7 @@ rem Script generated for ${fileName}
             { role: 'assistant', kind: 'chat', content: newPayload.explanation ? `${newPayload.explanation}\n\n${rt}` : rt }
           ])
           loopMessages.push({ role: 'assistant', content: responseText })
-          loopMessages.push({ role: 'user', content: `Here are the results of your last actions:\n\n${rt}\n\nIf there's more to do, provide the next set of operations. If the task is complete, just say so.` })
+          loopMessages.push({ role: 'user', content: `Results of your last actions:\n\n${rt}\n\nTell the user what was done and invite them to try again or ask for more changes. No JSON block.` })
           setStatus(`Round ${continueRound} done — continuing...`)
           continueRound++
           continue
@@ -5074,17 +5356,35 @@ rem Script generated for ${fileName}
         setPendingAgentProposal(newPayload)
         setPendingAgentStepIndex(0)
         setStatus(`Review the next action.`)
-        setMessages((current) => [
-          ...current.filter(m => m.id !== streamMessageId),
-          {
-            role: 'assistant',
-            kind: 'approval',
-            operationIndex: 0,
-            operations: approvalOps,
-            summary: newPayload.summary || 'I prepared more changes. Review and choose Allow or Skip.',
-            explanation: newPayload.explanation || ''
-          }
-        ])
+
+        // Check if any operations are file edits → open diff view instead of approval card
+        const fileOps2 = approvalOps.filter(op => {
+          const a = String(op?.action || '').toLowerCase()
+          return ['create', 'update', 'write', 'upsert'].includes(a)
+        })
+        if (fileOps2.length > 0) {
+          await openDiffView(approvalOps, newPayload.summary, newPayload.explanation)
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            {
+              role: 'assistant',
+              kind: 'chat',
+              content: `I've prepared changes to **${fileOps2.map(op => op.path || 'a file').join(', ')}**. Review the split-view diff tab in the editor and click **Apply & Continue** to approve, or **Skip** to decline.`
+            }
+          ])
+        } else {
+          setMessages((current) => [
+            ...current.filter(m => m.id !== streamMessageId),
+            {
+              role: 'assistant',
+              kind: 'approval',
+              operationIndex: 0,
+              operations: approvalOps,
+              summary: newPayload.summary || 'I prepared more changes. Review and choose Allow or Skip.',
+              explanation: newPayload.explanation || ''
+            }
+          ])
+        }
 
         return new Promise((resolve) => {
           agentLoopResumeRef.current = {
@@ -5698,7 +5998,7 @@ rem Script generated for ${fileName}
                   >
                     <button
                       type="button"
-                      onClick={() => openFile(tab.path)}
+                      onClick={() => tab.path.startsWith('__diff__') ? setActivePath(tab.path) : openFile(tab.path)}
                       className="flex min-w-0 items-center gap-2"
                     >
                       <FileText size={12} className="shrink-0" />
@@ -5725,7 +6025,99 @@ rem Script generated for ${fileName}
             )}
 
             <div className="min-h-0 flex-1">
-              {activePath ? (
+              {diffView ? (
+                <div className="flex h-full min-h-0 flex-col">
+                  {/* Diff toolbar */}
+                  <div className="flex items-center justify-between border-b border-black bg-[#2d2d2d] px-4 py-2 shrink-0">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs font-medium text-gray-400">Diff View</span>
+                      <span className="text-xs text-gray-500 font-mono">{diffView.filePath}</span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                        diffView.fileAction === 'create'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-blue-500/20 text-blue-300'
+                      }`}>
+                        {diffView.fileAction === 'create' ? 'New File' : 'Modified'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={skipDiffView}
+                        disabled={approvalBusy}
+                        className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-xs font-medium text-gray-400 hover:bg-white/5 hover:text-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Skip
+                      </button>
+                      <button
+                        type="button"
+                        onClick={acceptDiffChanges}
+                        disabled={approvalBusy}
+                        className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {approvalBusy ? 'Applying…' : 'Apply & Continue'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={closeDiffView}
+                        className="rounded p-1 text-gray-500 hover:text-white"
+                        aria-label="Close diff view"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  {/* Split view */}
+                  <div className="flex min-h-0 flex-1">
+                    {/* Old code (left) */}
+                    <div className="flex flex-1 flex-col min-w-0 border-r border-black/50">
+                      <div className="px-3 py-1.5 text-[11px] font-medium text-gray-500 bg-[#252526] border-b border-black/50 shrink-0">
+                        Original
+                      </div>
+                      <div className="flex-1 min-h-0">
+                        <Editor
+                          height="100%"
+                          theme="vs-dark"
+                          language={languageFromPath(diffView.filePath)}
+                          value={diffView.oldContent}
+                          options={{
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            automaticLayout: true,
+                            readOnly: true,
+                            scrollBeyondLastLine: false,
+                            renderLineHighlight: 'none',
+                            scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
+                          }}
+                        />
+                      </div>
+                    </div>
+                    {/* New code (right) */}
+                    <div className="flex flex-1 flex-col min-w-0">
+                      <div className="px-3 py-1.5 text-[11px] font-medium text-blue-400 bg-[#252526] border-b border-black/50 shrink-0">
+                        Proposed Changes
+                      </div>
+                      <div className="flex-1 min-h-0">
+                        <Editor
+                          height="100%"
+                          theme="vs-dark"
+                          language={languageFromPath(diffView.filePath)}
+                          value={diffView.newContent}
+                          options={{
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            automaticLayout: true,
+                            readOnly: true,
+                            scrollBeyondLastLine: false,
+                            renderLineHighlight: 'none',
+                            scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : activePath ? (
                 <div className="relative flex h-full min-h-0 flex-col">
                   {notebookToolbarVisible && (
                     <div className="border-b border-black/70 bg-[#202020] px-4 py-3">
@@ -5893,7 +6285,7 @@ rem Script generated for ${fileName}
                     </div>
                   )}
 
-                  <div className="relative min-h-0 flex-1 overflow-hidden p-4">
+                  <div className="samcode-scrollbar relative min-h-0 flex-1 overflow-auto p-4">
                     {activeIsNotebook && !notebookExtensionAvailable ? (
                       <div className="flex h-full flex-col items-center justify-center text-center text-gray-400">
                         <Store size={48} className="mb-4 text-gray-500" />
@@ -6012,6 +6404,14 @@ rem Script generated for ${fileName}
                                         cell?.metadata?.language ||
                                         (cell.cell_type === 'code' ? 'python' : 'markdown')
                                       }
+                                      options={{
+                                        scrollbar: { vertical: 'hidden', horizontal: 'hidden' },
+                                        scrollBeyondLastLine: false,
+                                        minimap: { enabled: false },
+                                        lineNumbers: 'on',
+                                        fontSize: 13,
+                                        padding: { top: 8, bottom: 8 }
+                                      }}
                                       value={
                                         Array.isArray(cell.source)
                                           ? cell.source.join('')
@@ -6126,7 +6526,9 @@ rem Script generated for ${fileName}
                                 options={{
                                   minimap: { enabled: false },
                                   fontSize: 14,
-                                  automaticLayout: true
+                                  automaticLayout: true,
+                                  scrollbar: { vertical: 'hidden', horizontal: 'hidden' },
+                                  scrollBeyondLastLine: false
                                 }}
                               />
                             </div>
@@ -6205,16 +6607,12 @@ rem Script generated for ${fileName}
                             fontSize: 14,
                             automaticLayout: true,
                             wordWrap: activeLanguage === 'java' ? 'on' : 'off',
-                            scrollbar:
-                              activeLanguage === 'java'
-                                ? {
-                                    vertical: 'hidden',
-                                    horizontal: 'hidden',
-                                    alwaysConsumeMouseWheel: false
-                                  }
-                                : {
-                                    alwaysConsumeMouseWheel: false
-                                  }
+                            scrollbar: {
+                              vertical: 'hidden',
+                              horizontal: 'hidden',
+                              alwaysConsumeMouseWheel: false
+                            },
+                            scrollBeyondLastLine: false
                           }}
                         />
                         {fileLoading && (
@@ -6418,72 +6816,114 @@ rem Script generated for ${fileName}
                       {messages.map((message, index) => (
                         <div key={index}>
                           {message.kind === 'approval' ? (
-                            <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-3">
+                            <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-4">
                               {(() => {
                                 const operations = Array.isArray(message.operations)
                                   ? message.operations
                                   : []
-                                const currentOpIdx = message.operationIndex || 0
-                                const currentOperation = operations[currentOpIdx]
-                                const remainingCommands = operations
-                                  .slice(currentOpIdx)
-                                  .filter(
-                                    (op) => String(op?.action || '').toLowerCase() === 'execute'
-                                  ).length
+
+                                const getFileOpLabel = (action) => {
+                                  const a = String(action || '').toLowerCase()
+                                  if (a === 'create') return ' Create'
+                                  if (a === 'update' || a === 'write' || a === 'upsert') return '🟡 Update'
+                                  if (a === 'delete') return '🔴 Delete'
+                                  if (a === 'execute') return '⚡ Execute'
+                                  if (a === 'mkdir') return '📁 Create folder'
+                                  if (a === 'read') return '📄 Read'
+                                  return a
+                                }
 
                                 return (
                                   <>
-                                    <div className="mb-2.5 flex items-center justify-between">
+                                    <div className="mb-3 flex items-center justify-between">
                                       <div className="flex items-center gap-2">
                                         <div className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/20">
                                           <div className="h-2 w-2 rounded-full bg-blue-400" />
                                         </div>
-                                        <span className="text-xs font-medium text-blue-300">
-                                          Approval needed
+                                        <span className="text-sm font-medium text-blue-300">
+                                          {operations.length} operation{operations.length > 1 ? 's' : ''} pending approval
                                         </span>
                                       </div>
-                                      {remainingCommands > 0 && (
-                                        <span className="text-[10px] text-gray-500">
-                                          {remainingCommands} command{remainingCommands > 1 ? 's' : ''} remaining
-                                        </span>
-                                      )}
                                     </div>
 
                                     {message.explanation && (
-                                      <div className="text-xs text-gray-300 mb-2 leading-relaxed">
+                                      <div className="text-xs text-gray-300 mb-3 leading-relaxed">
                                         {message.explanation}
                                       </div>
                                     )}
 
-                                    <div className="text-xs text-gray-400 mb-2.5">
-                                      {message.summary || 'Review the next action before it runs.'}
+                                    <div className="text-xs text-gray-400 mb-3">
+                                      {message.summary || 'Review the changes below before allowing.'}
                                     </div>
 
-                                    {currentOperation && (
-                                      <div className="rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2.5 text-xs mb-3">
-                                        <div className="font-medium text-white mb-0.5">
-                                          {describeAgentOperation(currentOperation)}
-                                        </div>
-                                      </div>
-                                    )}
+                                    <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1 mb-3">
+                                      {operations.map((op, i) => {
+                                        const action = String(op?.action || '').toLowerCase()
+                                        const path = String(op?.path || '').trim()
+                                        const command = String(op?.command || '').trim()
+                                        const content = String(op?.content || '')
+
+                                        const isFileWrite = ['create', 'update', 'write', 'upsert'].includes(action)
+                                        const isExec = action === 'execute'
+                                        const isDelete = action === 'delete'
+
+                                        const langFromPath = () => {
+                                          const ext = path.split('.').pop().toLowerCase()
+                                          const m = { js:'javascript', jsx:'javascript', ts:'typescript', tsx:'typescript', py:'python', ipynb:'json', cpp:'cpp', c:'c', java:'java', html:'html', css:'css', json:'json', sh:'bash', md:'markdown' }
+                                          return m[ext] || 'text'
+                                        }
+
+                                        return (
+                                          <div key={i} className="rounded-lg border border-white/10 bg-white/[0.06] overflow-hidden">
+                                            <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-white/[0.02]">
+                                              <span className="text-[11px] font-semibold text-gray-300">
+                                                {getFileOpLabel(action)}
+                                              </span>
+                                              <span className="text-[11px] text-gray-500 font-mono truncate">
+                                                {path || command}
+                                              </span>
+                                            </div>
+
+                                            {isExec && (
+                                              <div className="px-3 py-2">
+                                                <pre className="text-[11px] font-mono text-emerald-400 bg-[#1a1a1e] rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap">
+                                                  {command}
+                                                </pre>
+                                              </div>
+                                            )}
+
+                                            {isDelete && (
+                                              <div className="px-3 py-2 text-[11px] text-red-400">
+                                                This file/folder will be permanently deleted.
+                                              </div>
+                                            )}
+
+                                            {isFileWrite && (
+                                              <div className="max-h-[200px] overflow-auto">
+                                                <pre className="text-[11px] font-mono text-gray-300 bg-[#1a1a1e] px-3 py-2.5 overflow-x-auto whitespace-pre-wrap">
+                                                  {content || <em className="text-gray-600">empty content</em>}
+                                                </pre>
+                                              </div>
+                                            )}
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
 
                                     <div className="flex items-center justify-end gap-2">
                                       <button
                                         type="button"
                                         onClick={() => skipPendingAgentProposal()}
                                         disabled={approvalBusy}
-                                        className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-xs font-medium text-gray-400 hover:bg-white/5 hover:text-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
+                                        className="rounded-lg border border-white/10 bg-transparent px-4 py-1.5 text-xs font-medium text-gray-400 hover:bg-white/5 hover:text-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
                                       >
                                         Skip
                                       </button>
                                       <button
                                         type="button"
-                                        onClick={async () => {
-                                          setTerminalOpen(true)
-                                          await approvePendingAgentProposal()
-                                        }}
+                                        onClick={approvePendingAgentProposal}
                                         disabled={approvalBusy}
-                                        className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-50"
+                                        className="rounded-lg bg-blue-500 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-50"
                                       >
                                         {approvalBusy ? 'Running…' : 'Allow'}
                                       </button>
@@ -6492,30 +6932,28 @@ rem Script generated for ${fileName}
                                 )
                               })()}
                             </div>
+                          ) : message.role === 'user' ? (
+                            <div className="flex justify-end">
+                              <div className="max-w-[85%] wrap-break-word rounded-2xl px-4 py-2.5 bg-[#2d2d30] text-gray-200 text-sm leading-relaxed">
+                                <div dangerouslySetInnerHTML={{
+                                  __html: renderMarkdownMessage(message.content)
+                                }} />
+                              </div>
+                            </div>
                           ) : (
-                            <div
-                              className={`max-w-full wrap-break-word rounded-xl px-3.5 py-2.5 ${
-                                message.role === 'user'
-                                  ? 'self-end bg-blue-500/20 text-white border border-blue-500/10'
-                                  : 'self-start bg-white/[0.03] text-gray-200 border border-white/5'
-                              }`}
-                            >
-                              <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <div className="max-w-full wrap-break-word">
+                              <div className="flex items-center justify-between gap-2 mb-1">
                                 <div className="flex items-center gap-1.5">
-                                  {message.role === 'assistant' && (
-                                    <div className="flex h-4 w-4 items-center justify-center rounded bg-gradient-to-br from-blue-500 to-purple-500">
-                                      <Bot size={9} className="text-white" />
-                                    </div>
-                                  )}
-                                  <span className="text-[10px] font-medium text-gray-500">
-                                    {message.role === 'user' ? 'You' : 'Sam'}
-                                  </span>
+                                  <div className="flex h-4 w-4 items-center justify-center rounded bg-gradient-to-br from-blue-500 to-purple-500">
+                                    <Bot size={9} className="text-white" />
+                                  </div>
+                                  <span className="text-[10px] font-medium text-gray-500">Sam</span>
                                 </div>
                                 <div className="flex items-center gap-1">
                                   <button
                                     type="button"
                                     onClick={() => handleCopyMessage(message.content)}
-                                    className="rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
+                                    className="rounded p-1 text-gray-600 transition-colors hover:text-gray-400"
                                     aria-label="Copy message"
                                   >
                                     <Copy size={11} />
@@ -6523,7 +6961,7 @@ rem Script generated for ${fileName}
                                   <button
                                     type="button"
                                     onClick={() => handleEditMessage(message.content)}
-                                    className="rounded p-1 text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-300"
+                                    className="rounded p-1 text-gray-600 transition-colors hover:text-gray-400"
                                     aria-label="Edit message"
                                   >
                                     <Edit3 size={11} />
@@ -6531,7 +6969,7 @@ rem Script generated for ${fileName}
                                 </div>
                               </div>
                               <div
-                                className="leading-relaxed text-sm"
+                                className="leading-relaxed text-sm text-gray-300"
                                 dangerouslySetInnerHTML={{
                                   __html: renderMarkdownMessage(message.content)
                                 }}

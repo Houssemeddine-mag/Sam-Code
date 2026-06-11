@@ -903,11 +903,13 @@ app.whenReady().then(() => {
   ipcMain.handle('fs:readDir', async (_, dirPath) => {
     try {
       const items = await fs.readdir(dirPath, { withFileTypes: true })
-      return items.map((item) => ({
-        name: item.name,
-        path: join(dirPath, item.name),
-        isDirectory: item.isDirectory()
-      }))
+      return items
+        .filter((item) => item.name !== '.sam') // Hide .sam/ directory from tree
+        .map((item) => ({
+          name: item.name,
+          path: join(dirPath, item.name),
+          isDirectory: item.isDirectory()
+        }))
     } catch (e) {
       console.error('Failed to read dir', e)
       return []
@@ -1172,8 +1174,52 @@ app.whenReady().then(() => {
           action === 'write'
         ) {
           await fs.mkdir(dirname(targetPath), { recursive: true })
-          await fs.writeFile(targetPath, String(operation?.content ?? ''), 'utf-8')
-          applied.push({ action: 'write', path: targetPath })
+          let contentToWrite = String(operation?.content ?? '')
+
+          // For .ipynb files, wrap raw code in proper notebook JSON if needed
+          if (targetPath.toLowerCase().endsWith('.ipynb')) {
+            // Check if content is already valid notebook JSON
+            let isAlreadyNotebook = false
+            try {
+              const parsed = JSON.parse(contentToWrite)
+              if (parsed.cells && Array.isArray(parsed.cells) && parsed.nbformat) {
+                isAlreadyNotebook = true
+              }
+            } catch { /* not JSON */ }
+
+            if (!isAlreadyNotebook) {
+              // Wrap the raw code as a single code cell in a notebook
+              const notebook = {
+                cells: [{
+                  cell_type: 'code',
+                  metadata: {},
+                  execution_count: null,
+                  source: contentToWrite,
+                  outputs: []
+                }],
+                metadata: {
+                  kernelspec: {
+                    display_name: 'Python 3',
+                    language: 'python',
+                    name: 'python3'
+                  },
+                  language_info: { name: 'python' }
+                },
+                nbformat: 4,
+                nbformat_minor: 5
+              }
+              contentToWrite = JSON.stringify(notebook, null, 2)
+            }
+          }
+
+          await fs.writeFile(targetPath, contentToWrite, 'utf-8')
+          // Verify the file was actually written
+          const written = await fs.readFile(targetPath, 'utf-8')
+          if (written !== contentToWrite) {
+            failed.push({ action, path: rawPath, reason: 'File verification failed — written content does not match.' })
+            continue
+          }
+          applied.push({ action: 'write', path: targetPath, size: Buffer.byteLength(contentToWrite, 'utf-8') })
           continue
         }
 
@@ -1732,6 +1778,81 @@ app.whenReady().then(() => {
       return true
     } catch (e) {
       console.error('zoom out failed', e)
+      return false
+    }
+  })
+
+  // === .sam/ directory: per-folder agent history and configuration ===
+  const SAM_DIR_NAME = '.sam'
+
+  ipcMain.handle('sam:ensureDir', async (_, folderPath) => {
+    const base = String(folderPath || '').trim()
+    if (!base) return null
+    const samPath = join(resolve(base), SAM_DIR_NAME)
+    try {
+      await fs.mkdir(samPath, { recursive: true })
+      console.log('[.sam MAIN] ensured dir:', samPath)
+      return samPath
+    } catch (e) {
+      console.error('[.sam MAIN] ensureDir error:', e.message)
+      return null
+    }
+  })
+
+  ipcMain.handle('sam:loadConversations', async (_, folderPath) => {
+    const base = String(folderPath || '').trim()
+    if (!base) return null
+    const filePath = join(resolve(base), SAM_DIR_NAME, 'conversations.json')
+    console.log('[.sam MAIN] loading from:', filePath)
+    try {
+      const raw = await fs.readFile(filePath, 'utf-8')
+      console.log('[.sam MAIN] loaded OK')
+      return JSON.parse(raw)
+    } catch {
+      console.log('[.sam MAIN] no saved conversations')
+      return null
+    }
+  })
+
+  ipcMain.handle('sam:saveConversations', async (_, folderPath, data) => {
+    const base = String(folderPath || '').trim()
+    if (!base) return false
+    const samPath = join(resolve(base), SAM_DIR_NAME)
+    const filePath = join(samPath, 'conversations.json')
+    console.log('[.sam MAIN] saving to:', filePath, 'messages:', data?.length)
+    try {
+      await fs.mkdir(samPath, { recursive: true })
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
+      console.log('[.sam MAIN] saved OK')
+      return true
+    } catch (e) {
+      console.error('[.sam MAIN] save error:', e.message)
+      return false
+    }
+  })
+
+  ipcMain.handle('sam:loadSettings', async (_, folderPath) => {
+    const base = String(folderPath || '').trim()
+    if (!base) return null
+    const filePath = join(resolve(base), SAM_DIR_NAME, 'settings.json')
+    try {
+      const raw = await fs.readFile(filePath, 'utf-8')
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle('sam:saveSettings', async (_, folderPath, data) => {
+    const base = String(folderPath || '').trim()
+    if (!base) return false
+    const samPath = join(resolve(base), SAM_DIR_NAME)
+    const filePath = join(samPath, 'settings.json')
+    try {
+      await fs.mkdir(samPath, { recursive: true })
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
+      return true
+    } catch {
       return false
     }
   })
