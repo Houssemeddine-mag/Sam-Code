@@ -1,6 +1,6 @@
 {
   "hosting": {
-    "public": "landing",
+    "public": "marketplace",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
       {

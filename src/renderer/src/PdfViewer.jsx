@@ -1,66 +1,91 @@
-/* eslint-disable react/prop-types, react-hooks/set-state-in-effect */
-import { useEffect, useRef, useState, useCallback } from 'react'
+/* eslint-disable react/prop-types */
+import { useEffect, useRef, useState } from 'react'
 import { ZoomIn, ZoomOut, Maximize2, Download, Loader2 } from 'lucide-react'
 
 function PdfViewer({ filePath, pushActivity }) {
   const iframeRef = useRef(null)
-  const [blobUrl, setBlobUrl] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [fileSize, setFileSize] = useState(0)
   const [fileName, setFileName] = useState('')
+  const [blobUrl, setBlobUrl] = useState('')
+  const objectUrlRef = useRef(null)
+  const pushActivityRef = useRef(pushActivity)
 
-  const loadPdf = useCallback(async () => {
-    if (!filePath) return
-
-    setLoading(true)
-    setError('')
-    const name = filePath.split(/[\\/]/).pop() || 'document.pdf'
-    setFileName(name)
-
-    try {
-      const result = await window.api?.readFileAsArrayBuffer?.(filePath)
-
-      if (!result) {
-        throw new Error('Failed to read PDF file')
-      }
-
-      if (!result.ok) {
-        throw new Error(result.error || 'Unknown error reading PDF')
-      }
-
-      setFileSize(result.size)
-
-      const uint8Array = new Uint8Array(result.buffer)
-      const blob = new Blob([uint8Array], { type: 'application/pdf' })
-      const url = URL.createObjectURL(blob)
-
-      setBlobUrl(url)
-      setLoading(false)
-
-      pushActivity?.('success', `Opened ${name} (${(result.size / 1024).toFixed(0)}KB)`)
-    } catch (err) {
-      setError(String(err?.message || err))
-      setLoading(false)
-      pushActivity?.('error', `Failed to open PDF: ${err?.message || err}`)
-    }
-  }, [filePath, pushActivity])
+  // Keep pushActivity ref current without triggering re-renders
+  useEffect(() => {
+    pushActivityRef.current = pushActivity
+  }, [pushActivity])
 
   useEffect(() => {
-    loadPdf()
-    return () => {
-      if (blobUrl) {
-        URL.revokeObjectURL(blobUrl)
+    if (!filePath) {
+      setLoading(false)
+      return
+    }
+
+    // Store cleanup function
+    let cancelled = false
+
+    const loadPdf = async () => {
+      setLoading(true)
+      setError('')
+      
+      const name = filePath.split(/[\\/]/).pop() || 'document.pdf'
+      setFileName(name)
+
+      try {
+        const result = await window.api?.readFileAsArrayBuffer?.(filePath)
+
+        if (!result) {
+          throw new Error('Failed to read PDF file')
+        }
+
+        if (!result.ok) {
+          throw new Error(result.error || 'Unknown error reading PDF')
+        }
+
+        setFileSize(result.size)
+
+        const uint8Array = new Uint8Array(result.buffer)
+        const blob = new Blob([uint8Array], { type: 'application/pdf' })
+        const url = URL.createObjectURL(blob)
+        
+        // Clean up previous URL
+        if (objectUrlRef.current) {
+          URL.revokeObjectURL(objectUrlRef.current)
+        }
+        
+        objectUrlRef.current = url
+        setBlobUrl(url)
+        setLoading(false)
+
+        pushActivityRef.current?.('success', `Opened ${name} (${(result.size / 1024).toFixed(0)}KB)`)
+      } catch (err) {
+        if (!cancelled) {
+          setError(String(err?.message || err))
+          setLoading(false)
+          pushActivityRef.current?.('error', `Failed to open PDF: ${err?.message || err}`)
+        }
       }
     }
-  }, [loadPdf, blobUrl])
+
+    loadPdf()
+
+    return () => {
+      cancelled = true
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current)
+        objectUrlRef.current = null
+      }
+    }
+  }, [filePath])
 
   const handleDownload = async () => {
     try {
       if (blobUrl) {
         const a = document.createElement('a')
         a.href = blobUrl
-        a.download = fileName
+        a.download = fileName || 'document.pdf'
         a.click()
       }
     } catch (err) {
@@ -132,10 +157,10 @@ function PdfViewer({ filePath, pushActivity }) {
         <div className="mt-1 max-w-sm text-xs text-gray-400">{error}</div>
         <button
           type="button"
-          onClick={loadPdf}
+          onClick={() => window.location.reload()}
           className="mt-4 rounded bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
         >
-          Retry
+          Reload
         </button>
       </div>
     )

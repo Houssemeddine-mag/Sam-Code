@@ -1,0 +1,8 @@
+{
+  "provider": "custom",
+  "model": "qwen3.7-plus",
+  "api_key": "sk-ws-H.IELMHD.tRyK.MEQCIAlckstTgDs_vABH9eN9dqHDY0zp3zjT_L1VWhalCBRQAiBw8ZiQjUtj5QIw7Uq2ACgD4xi_nKzUbfmW_xI1-A6smw",
+  "custom_base_url": "https://ws-0cb3zotyldbm4a8m.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+  "caveman_mode": 2,
+  "frontend_mode": true
+}
