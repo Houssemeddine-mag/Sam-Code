@@ -285,13 +285,49 @@
       .footer-links a:hover{color:var(--text)}
       .footer-copy{font-size:0.82rem;color:var(--text-3)}
 
+      /* CLI section */
+      .cli-section{
+        background:linear-gradient(180deg,var(--surface) 0%,var(--bg) 100%);
+        border-top:1px solid var(--border);
+        border-bottom:1px solid var(--border);
+      }
+      .cli-grid{
+        display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:start;
+      }
+      .cli-info h2{
+        font-size:clamp(2.2rem,4vw,3.2rem);font-weight:800;
+        letter-spacing:-0.03em;line-height:1.05;margin-bottom:8px;
+      }
+      .cli-info h2 span{color:var(--accent)}
+      .cli-subtitle{
+        font-size:1rem;color:var(--accent);font-weight:500;margin-bottom:20px;
+      }
+      .cli-info>p{
+        font-size:1.05rem;color:var(--text-2);line-height:1.7;margin-bottom:32px;
+      }
+      .cli-features{display:grid;gap:16px}
+      .cli-feat{
+        display:flex;gap:14px;padding:16px;border-radius:var(--radius);
+        border:1px solid var(--border);background:rgba(255,255,255,0.02);
+        transition:border-color .2s,background .2s;
+      }
+      .cli-feat:hover{border-color:var(--border-hover);background:var(--surface)}
+      .cli-feat-icon{
+        width:36px;height:36px;border-radius:8px;flex-shrink:0;
+        display:flex;align-items:center;justify-content:center;
+        background:var(--accent-dim);color:var(--accent);font-size:1rem;
+      }
+      .cli-feat h4{font-size:0.92rem;font-weight:600;margin-bottom:4px}
+      .cli-feat p{font-size:0.84rem;color:var(--text-3);line-height:1.5}
+      .cli-terminal{position:sticky;top:100px}
+
       /* RESPONSIVE */
       @media(max-width:900px){
-        .hero-grid,.agent-grid{grid-template-columns:1fr;gap:40px}
+        .hero-grid,.agent-grid,.cli-grid{grid-template-columns:1fr;gap:40px}
         .features-grid{grid-template-columns:1fr}
         .download-grid{grid-template-columns:1fr}
         .nav-links{display:none}
-        .agent-visual{position:static}
+        .agent-visual,.cli-terminal{position:static}
         .footer-inner{flex-direction:column;text-align:center}
       }
     </style>
@@ -319,7 +355,7 @@
           <div class="hero-badge">Now available on all platforms</div>
           <h1>The IDE that<br/><span>thinks with you.</span></h1>
           <p class="hero-desc">
-            A lightweight desktop editor with a built-in AI agent that executes step-by-step, 
+            A lightweight desktop editor with a built-in AI agent that executes step-by-step,
             recovers from errors, and works with any LLM provider you choose.
           </p>
           <div class="hero-actions">
@@ -361,7 +397,7 @@
         <div class="section-label">Features</div>
         <h2 class="section-title">Everything you need.<br/>Nothing you don't.</h2>
         <p class="section-desc">
-          Built from the ground up for speed and clarity. No bloated feature set—just the tools 
+          Built from the ground up for speed and clarity. No bloated feature set—just the tools
           that matter for modern development workflows.
         </p>
         <div class="features-grid">
@@ -407,9 +443,9 @@
             <h2>Meet <span>Sam</span></h2>
             <p class="agent-subtitle">Your independent AI coding agent</p>
             <p>
-              Sam isn't a copilot that suggests completions. It's an autonomous agent that reads 
-              your workspace, plans multi-step tasks, executes terminal commands one at a time, 
-              and recovers from errors automatically. Bring your own API key—works with OpenAI, 
+              Sam isn't a copilot that suggests completions. It's an autonomous agent that reads
+              your workspace, plans multi-step tasks, executes terminal commands one at a time,
+              and recovers from errors automatically. Bring your own API key—works with OpenAI,
               Anthropic, Google, Ollama, or any OpenRouter model.
             </p>
             <div class="agent-features">
@@ -492,6 +528,81 @@
       </div>
     </section>
 
+    <section class="section cli-section" id="cli">
+      <div class="container">
+        <div class="cli-grid">
+          <div class="cli-info">
+            <div class="section-label">CLI Edition</div>
+            <h2>SamCode <span>CLI</span></h2>
+            <p class="cli-subtitle">Your AI agent, now in the terminal</p>
+            <p>
+              The same autonomous AI agent from Sam Code, available as a pip-installable CLI.
+              Reads your project structure, writes and edits code, executes terminal commands,
+              and fixes its own errors — all from the command line.
+            </p>
+            <div class="cli-features">
+              <div class="cli-feat">
+                <div class="cli-feat-icon">🧠</div>
+                <div>
+                  <h4>Codebase Memory (RAG)</h4>
+                  <p>Automatically indexes your workspace and uses semantic search to find code by meaning, not just keywords.</p>
+                </div>
+              </div>
+              <div class="cli-feat">
+                <div class="cli-feat-icon">📊</div>
+                <div>
+                  <h4>Data Analyst &amp; BI Mode</h4>
+                  <p>Reads CSV, Excel, Parquet, and SQL databases. Generates publication-quality charts and exports to Jupyter Notebooks automatically.</p>
+                </div>
+              </div>
+              <div class="cli-feat">
+                <div class="cli-feat-icon">🎨</div>
+                <div>
+                  <h4>Frontend Architect Mode</h4>
+                  <p>Transforms into a Senior UI/UX Engineer that creates bespoke design systems with custom color palettes and modern CSS architectures.</p>
+                </div>
+              </div>
+              <div class="cli-feat">
+                <div class="cli-feat-icon">🌐</div>
+                <div>
+                  <h4>Universal AI Support</h4>
+                  <p>Connect to 15+ providers including OpenAI, Anthropic, Google Gemini, Ollama, Groq, and more with dynamic model fetching.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="terminal cli-terminal">
+            <div class="terminal-bar">
+              <div class="terminal-dots">
+                <span class="d-r"></span><span class="d-y"></span><span class="d-g"></span>
+              </div>
+              <div class="terminal-title">
+                <img src="./1.png" alt="" /> samcode-cli — terminal
+              </div>
+              <div></div>
+            </div>
+            <div class="terminal-body">
+              <div class="ln"><span class="ln-num">$</span><span><span class="kw">pip</span> install samcode-cli</span></div>
+              <div class="terminal-output" style="margin-top:0;padding-top:0;border:none">
+                <div class="result" style="color:var(--green)">✓ Successfully installed (2.3s)</div>
+              </div>
+              <div class="ln" style="margin-top:8px"><span class="ln-num">$</span><span>samcode</span></div>
+              <div class="terminal-output" style="margin-top:0;padding-top:0;border:none">
+                <div class="result" style="color:var(--text-2)">⟐ Loading workspace...</div>
+                <div class="result" style="color:var(--green)">✓ SamCode CLI ready — 3.2s</div>
+              </div>
+              <div class="ln" style="margin-top:8px"><span class="ln-num" style="color:var(--accent)">❯</span><span style="color:var(--accent)">/data sales.csv</span></div>
+              <div class="terminal-output" style="margin-top:0;padding-top:0;border:none">
+                <div class="result" style="color:var(--text-2)">⟐ Analyzing 14 columns, 2.4k rows...</div>
+                <div class="result" style="color:var(--green)">✓ Chart generated → output/chart.png</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       <div class="container footer-inner">
         <div class="footer-brand">
@@ -504,7 +615,7 @@
           <a href="#download">Download</a>
           <a href="https://github.com/Houssemeddine-mag/Sam-Code" target="_blank" rel="noopener">GitHub</a>
         </div>
-        <div class="footer-copy">© 2025 Sam Code. Built for developers.</div>
+        <div class="footer-copy">© 2026 Sam Code. Built for developers.</div>
       </div>
     </footer>
 
